@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from forgeflow.apps.api.deps import ContainerDep
+from forgeflow.core.errors import NotFoundError
 from forgeflow.platform.orchestration.service import MAX_REQUEST_CHARS
 from forgeflow.schemas.requirement import ClarificationQuestion, RequirementSpecification
 from forgeflow.schemas.task import Task
+from forgeflow.schemas.verification import A2AMessage, FinalReport
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
@@ -69,6 +72,33 @@ async def get_workflow(workflow_id: str, c: ContainerDep) -> WorkflowDetail:
 async def cancel_workflow(workflow_id: str, c: ContainerDep) -> Workflow:
     """Cancels the workflow and every open task; running agents stop at their next heartbeat."""
     return await c.service.cancel_workflow(workflow_id)
+
+
+class DecisionRequest(BaseModel):
+    action: Literal["accept", "repair"] = Field(
+        description="accept: complete with the open findings recorded as accepted risks; "
+        "repair: allow one more automatic repair round."
+    )
+
+
+@router.post("/workflows/{workflow_id}/decision")
+async def resolve_decision(workflow_id: str, body: DecisionRequest, c: ContainerDep) -> Workflow:
+    """Human decision when blockers remain after the automatic repair limit (spec section 57)."""
+    return await c.execution.resolve_decision(workflow_id, body.action)
+
+
+@router.get("/workflows/{workflow_id}/report")
+async def get_report(workflow_id: str, c: ContainerDep) -> FinalReport:
+    wf = await c.store.get_workflow(workflow_id)
+    if wf.report is None:
+        raise NotFoundError("the workflow has no final report yet")
+    return wf.report
+
+
+@router.get("/workflows/{workflow_id}/a2a")
+async def list_a2a(workflow_id: str, c: ContainerDep) -> list[A2AMessage]:
+    await c.store.get_workflow(workflow_id)
+    return await c.store.list_a2a_messages(workflow_id)
 
 
 @router.get("/workflows/{workflow_id}/requirements")

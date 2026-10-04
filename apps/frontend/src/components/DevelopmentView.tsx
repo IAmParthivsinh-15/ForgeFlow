@@ -12,6 +12,7 @@ function defaultTask(tasks: Task[]): Task | undefined {
   return (
     tasks.find((t) => t.status === "FAILED") ??
     tasks.find((t) => t.status === "RUNNING") ??
+    [...tasks].reverse().find((t) => t.result?.blocking) ??
     tasks.find((t) => t.kind === "integrate" && t.status === "COMPLETED") ??
     tasks[tasks.length - 1]
   );
@@ -32,7 +33,7 @@ export function DevelopmentView({ workflow, tasks, runs }: { workflow: Workflow;
   return (
     <div className="flex flex-col gap-4">
       <Card
-        title="Development"
+        title={tasks.some((t) => t.kind === "decompose") ? "Development & verification" : "Verification"}
         aside={tasks.length > 0 && <span className="text-xs text-slate-500">{done}/{tasks.length} tasks completed</span>}
       >
         {execution && (

@@ -133,6 +133,15 @@ class GitClient:
         validate_ref(branch)
         await self.run(repo, "worktree", "add", "--quiet", "-b", branch, str(path), base)
 
+    async def add_detached_worktree(self, repo: Path, path: Path, commit: str) -> None:
+        await self.run(
+            repo, "worktree", "add", "--quiet", "--detach", str(path), validate_sha(commit)
+        )
+
+    async def fast_forward(self, worktree: Path, commit: str) -> None:
+        """Advance the worktree's branch to `commit`; fails unless it is a fast-forward."""
+        await self.run(worktree, "merge", "--ff-only", "--quiet", validate_sha(commit))
+
     async def remove_worktree(self, repo: Path, path: Path) -> None:
         await self.run(repo, "worktree", "remove", "--force", str(path), check=False)
         await self.run(repo, "worktree", "prune", check=False)

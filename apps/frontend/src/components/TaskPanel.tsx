@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { api, type AgentRun, type Task } from "../lib/api";
 import { DiffView } from "./DiffView";
+import { VerificationBody } from "./VerificationViews";
 import { TASK_STATUS_STYLE } from "./TaskGraph";
 
 /** Task detail (spec section 64): what ran, where, what changed, and the evidence. */
@@ -49,7 +50,17 @@ export function TaskPanel({ task, workflowId, runs }: { task: Task; workflowId: 
       {error && <p className="text-sm text-rose-600">{error.message}</p>}
       {task.error && <p className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800 dark:bg-rose-950/50 dark:text-rose-300">{task.error}</p>}
       {task.wait_reason && <p className="text-sm text-amber-700 dark:text-amber-400">{task.wait_reason}</p>}
-      {task.instructions && <p className="text-sm text-slate-600 dark:text-slate-300">{task.instructions}</p>}
+      {task.kind === "repair" ? (
+        <details open={task.status !== "COMPLETED"}>
+          <summary className="cursor-pointer text-sm font-medium">Findings to fix</summary>
+          <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-950">
+            {task.instructions}
+          </pre>
+        </details>
+      ) : (
+        task.instructions && <p className="text-sm text-slate-600 dark:text-slate-300">{task.instructions}</p>
+      )}
+      {result?.verdict && <VerificationBody result={result} />}
 
       <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
         {task.file_scope.length > 0 && <Item label="File scope" value={task.file_scope.join(", ")} mono />}
@@ -60,9 +71,9 @@ export function TaskPanel({ task, workflowId, runs }: { task: Task; workflowId: 
         {result && result.merged_tasks.length > 0 && <Item label="Built on / merged" value={result.merged_tasks.join(", ")} mono />}
       </dl>
 
-      {result?.summary && <p className="text-sm">{result.summary}</p>}
+      {result?.summary && !result.verdict && <p className="text-sm">{result.summary}</p>}
 
-      {result && result.files_changed.length > 0 && (
+      {result && !result.verdict && result.files_changed.length > 0 && (
         <div>
           <div className="mb-1 flex items-center justify-between">
             <h4 className="text-sm font-medium">Files changed ({result.files_changed.length})</h4>

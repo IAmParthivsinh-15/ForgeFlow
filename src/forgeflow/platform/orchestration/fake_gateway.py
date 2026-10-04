@@ -7,18 +7,31 @@ Behaviour:
 - development: a three-subtask plan (backend + frontend in parallel, then docs that
   depends on both) under `forgeflow-demo/`;
 - implementation: writes one small, real file per scope pattern;
-- conflict resolution: keeps both sides of every conflict region.
+- conflict resolution: keeps both sides of every conflict region;
+- code review: approves, except that a request containing "demo-repair" gets
+  changes requested in round 1 (to demonstrate the repair loop);
+- security: maps scanner findings onto OWASP categories;
+- QA: PASS when an executed test passed, FAIL when it failed, else UNCERTAIN; asks
+  the Developer one A2A question to exercise the channel;
+- CI diagnosis / A2A answers: deterministic text.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.platform.orchestration.gateway import (
+    A2ARequest,
     AgentOutcome,
     AnalysisRequest,
+    CIRequest,
     ConflictRequest,
     DevelopmentRequest,
     ImplementationRequest,
+    QARequest,
+    ReviewRequest,
+    SecurityRequest,
 )
 from forgeflow.schemas.requirement import (
     AnalyzerAcceptanceCriterion,
@@ -32,6 +45,17 @@ from forgeflow.schemas.task import (
     ImplementationReport,
     ResolutionReport,
     SubtaskSpec,
+)
+from forgeflow.schemas.verification import (
+    OWASP_TOP_10_2021,
+    A2AAnswer,
+    CIAnalysis,
+    CriterionResult,
+    OwaspCategoryResult,
+    QAAssessment,
+    ReviewFinding,
+    ReviewReport,
+    SecurityAssessment,
 )
 from forgeflow.schemas.workflow import IntakeAssessment, Intent, ProviderAttempt
 from forgeflow.tools.filesystem.globs import literal_prefix
@@ -213,3 +237,107 @@ class FakeAgentGateway:
             summary="Kept both sides of every conflict.", resolved_files=request.conflicted_files
         )
         return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def review_changes(
+        self, ctx: AgentRuntimeContext, request: ReviewRequest
+    ) -> AgentOutcome[ReviewReport]:
+        demo = "demo-repair" in request.specification.summary.lower()
+        if demo and request.round == 1 and request.change.files:
+            target = request.change.files[0]
+            report = ReviewReport(
+                decision="changes_requested",
+                summary=f"Reviewed {len(request.change.files)} file(s); one blocking issue.",
+                findings=[
+                    ReviewFinding(
+                        severity="high",
+                        category="correctness",
+                        file=target,
+                        line=1,
+                        message="Demo finding: the change needs a follow-up fix.",
+                        suggestion="Apply the fix described in the finding.",
+                    )
+                ],
+                requirements_alignment="Partially aligned until the finding is fixed.",
+            )
+        else:
+            report = ReviewReport(
+                decision="approved",
+                summary=(
+                    f"Reviewed {len(request.change.files)} changed file(s) in domains "
+                    f"{', '.join(request.change.domains) or 'none'}; no blocking issues."
+                ),
+                requirements_alignment="The change addresses the acceptance criteria.",
+            )
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def assess_security(
+        self, ctx: AgentRuntimeContext, request: SecurityRequest
+    ) -> AgentOutcome[SecurityAssessment]:
+        failing = {
+            f.category
+            for scan in request.scans
+            for f in scan.findings
+            if f.severity in ("high", "critical")
+        }
+        incomplete = any(scan.status in ("unavailable", "error") for scan in request.scans)
+        categories = [
+            OwaspCategoryResult(
+                id=cid,
+                status="fail" if cid in failing else ("uncertain" if incomplete else "pass"),
+                notes="scanner evidence" if cid in failing else "no evidence of issues",
+            )
+            for cid in OWASP_TOP_10_2021
+        ]
+        assessment = SecurityAssessment(
+            summary=f"Evaluated {len(categories)} OWASP categories using "
+            f"{sum(s.status == 'completed' for s in request.scans)} completed scanner(s).",
+            categories=categories,
+        )
+        return AgentOutcome(assessment, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def verify_acceptance(
+        self, ctx: AgentRuntimeContext, request: QARequest
+    ) -> AgentOutcome[QAAssessment]:
+        if ctx.a2a is not None and request.specification.acceptance_criteria:
+            first = request.specification.acceptance_criteria[0].id
+            await ctx.a2a.ask(f"Which test validates {first}?", context=first)
+        tests = [c for c in request.executed_checks if c.kind == "test"]
+        criteria = []
+        for ac in request.specification.acceptance_criteria:
+            status: Literal["PASS", "FAIL", "UNCERTAIN"]
+            if tests and all(c.passed for c in tests):
+                status, evidence = "PASS", f"`{tests[0].command}` passed"
+            elif tests:
+                status, evidence = "FAIL", f"`{tests[0].command}` failed"
+            else:
+                status, evidence = "UNCERTAIN", "no executed test covers this criterion"
+            criteria.append(
+                CriterionResult(
+                    id=ac.id, status=status, evidence=evidence, checks=[c.command for c in tests]
+                )
+            )
+        assessment = QAAssessment(summary=f"Evaluated {len(criteria)} criteria.", criteria=criteria)
+        return AgentOutcome(assessment, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def analyze_ci_failure(
+        self, ctx: AgentRuntimeContext, request: CIRequest
+    ) -> AgentOutcome[CIAnalysis]:
+        failed = next((s.name for s in request.build.stages if s.status != "SUCCESS"), "unknown")
+        tail = [line for line in request.build.log_tail.splitlines() if line.strip()][-5:]
+        analysis = CIAnalysis(
+            failing_stage=failed,
+            summary=f"Build {request.build.status.lower()} in stage {failed}.",
+            suspected_cause="See the final log lines.",
+            evidence=tail,
+            recommended_fix=f"Fix the failure reported in the {failed} stage.",
+        )
+        return AgentOutcome(analysis, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def answer_a2a(
+        self, ctx: AgentRuntimeContext, request: A2ARequest
+    ) -> AgentOutcome[A2AAnswer]:
+        answer = A2AAnswer(
+            answer=f"The repository's test suite covers it ({request.context or 'see tests'}).",
+            references=[request.context] if request.context else [],
+        )
+        return AgentOutcome(answer, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])

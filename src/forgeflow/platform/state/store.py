@@ -18,6 +18,7 @@ from typing import Protocol
 from forgeflow.schemas.events import Event
 from forgeflow.schemas.requirement import ClarificationQuestion, RequirementSpecification
 from forgeflow.schemas.task import Task, TaskStatus, Workspace
+from forgeflow.schemas.verification import A2AMessage
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 
 
@@ -39,6 +40,7 @@ class Commit:
     agent_runs: list[AgentRunRecord] = field(default_factory=list)
     tasks: list[TaskWrite] = field(default_factory=list)
     workspaces: list[Workspace] = field(default_factory=list)
+    a2a_messages: list[A2AMessage] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
 
 
@@ -93,6 +95,8 @@ class WorkflowStore(Protocol):
     async def get_workspace(self, workspace_id: str) -> Workspace: ...
 
     async def list_workspaces(self, workflow_id: str | None = None) -> list[Workspace]: ...
+
+    async def list_a2a_messages(self, workflow_id: str) -> list[A2AMessage]: ...
 
     async def list_events(
         self, workflow_id: str, after_seq: int = 0, limit: int = 500

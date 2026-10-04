@@ -18,7 +18,6 @@ import asyncio
 import contextlib
 import logging
 import sys
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +31,16 @@ from forgeflow.core.errors import (
 )
 from forgeflow.core.ids import new_id, utcnow
 from forgeflow.core.logging import bind_context, clear_context, log_event
+from forgeflow.platform.ci.jenkins import CIProvider
+from forgeflow.platform.execution.common import (
+    HandlerOutput,
+    a2a_event,
+    agent_event,
+    check_event,
+    run_from_outcome,
+    run_record,
+)
+from forgeflow.platform.execution.verification import VerificationStages
 from forgeflow.platform.orchestration.execution import TaskChanges, task_event
 from forgeflow.platform.orchestration.gateway import (
     AgentGateway,
@@ -44,28 +53,19 @@ from forgeflow.platform.state.store import Commit, WorkflowStore
 from forgeflow.platform.task_graph.conflicts import conflict_reason
 from forgeflow.platform.task_graph.graph import ancestors, completed_in_order, validate_plan
 from forgeflow.platform.worktrees.manager import WorktreeManager
-from forgeflow.schemas.events import Event, EventType, Topics
+from forgeflow.schemas.events import EventType
 from forgeflow.schemas.requirement import RequirementSpecification
-from forgeflow.schemas.task import CheckRun, Task, TaskResult, TaskStatus, Workspace
+from forgeflow.schemas.task import Task, TaskResult, TaskStatus
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 from forgeflow.tools.filesystem import globs
 from forgeflow.tools.git.client import GitClient
+from forgeflow.tools.security.scanners import ScannerSuite
 from forgeflow.tools.shell.commands import CheckRunner
 
 logger = logging.getLogger(__name__)
 
 CONFLICT_MARKERS = ("<<<<<<<", ">>>>>>>")
 POST_MERGE_CHECKS = ("test", "lint")
-
-
-@dataclass
-class HandlerOutput:
-    result: TaskResult
-    new_tasks: list[Task] = field(default_factory=list)
-    workspaces: list[Workspace] = field(default_factory=list)
-    agent_runs: list[AgentRunRecord] = field(default_factory=list)
-    events: list[Event] = field(default_factory=list)
-    workspace_id: str | None = None
 
 
 def is_retryable(exc: BaseException) -> bool:
@@ -86,6 +86,8 @@ class TaskExecutor:
         git: GitClient,
         settings: Settings,
         worker_id: str | None = None,
+        ci: CIProvider | None = None,
+        scanners: ScannerSuite | None = None,
     ) -> None:
         self.store = store
         self.gateway = gateway
@@ -93,6 +95,16 @@ class TaskExecutor:
         self.git = git
         self.settings = settings
         self.worker_id = worker_id or new_id("worker")
+        self.verification = VerificationStages(
+            store,
+            gateway,
+            worktrees,
+            git,
+            settings,
+            ci=ci,
+            scanners=scanners
+            or ScannerSuite.default(settings.semgrep_rules_path, settings.scanner_timeout_seconds),
+        )
 
     # ------------------------------------------------------------------- entry
 
@@ -194,7 +206,10 @@ class TaskExecutor:
                     tasks=changes.task_writes(),
                     workspaces=output.workspaces,
                     agent_runs=output.agent_runs,
-                    events=output.events + changes.events,
+                    a2a_messages=output.a2a_messages,
+                    events=output.events
+                    + [a2a_event(task, m) for m in output.a2a_messages]
+                    + changes.events,
                 )
             )
         except ConcurrencyConflict:
@@ -223,9 +238,7 @@ class TaskExecutor:
         attempts = getattr(exc, "attempts", None)
         if attempts:
             runs.append(
-                self._run_record(
-                    task, task.agent_type, "unknown", attempts, [], now, error=current.error
-                )
+                run_record(task, task.agent_type, "unknown", attempts, [], now, error=current.error)
             )
         try:
             await self.store.commit(
@@ -247,7 +260,11 @@ class TaskExecutor:
             return await self._decompose(wf, task, spec)
         if task.kind == "implement":
             return await self._implement(wf, task, spec)
-        return await self._integrate(wf, task, spec)
+        if task.kind == "integrate":
+            return await self._integrate(wf, task, spec)
+        if task.kind == "repair":
+            return await self._repair(wf, task, spec)
+        return await self.verification.run(wf, task, spec)
 
     async def _decompose(
         self, wf: Workflow, task: Task, spec: RequirementSpecification
@@ -318,12 +335,12 @@ class TaskExecutor:
             risks=risks,
             next_actions=[f"{t.key}: {t.title}" for t in new_tasks],
         )
-        run = self._run_from_outcome(task, "developer", outcome, started)
+        run = run_from_outcome(task, "developer", outcome, started)
         return HandlerOutput(
             result=result,
             new_tasks=new_tasks,
             agent_runs=[run],
-            events=[self._agent_event(task, run)],
+            events=[agent_event(task, run)],
         )
 
     async def _implement(
@@ -418,9 +435,9 @@ class TaskExecutor:
             next_actions=outcome.output.next_actions,
             merged_tasks=prepared.merged,
         )
-        run = self._run_from_outcome(task, "developer_subagent", outcome, started)
-        events += [self._check_event(task, c) for c in checks.runs]
-        events.append(self._agent_event(task, run))
+        run = run_from_outcome(task, "developer_subagent", outcome, started)
+        events += [check_event(task, c) for c in checks.runs]
+        events.append(agent_event(task, run))
         return HandlerOutput(
             result=result,
             workspaces=[prepared.workspace],
@@ -472,7 +489,7 @@ class TaskExecutor:
                     )
                 )
                 outcome, started = await self._resolve(wf, task, spec, path, t, merged, conflicts)
-                runs.append(self._run_from_outcome(task, "integrator", outcome, started))
+                runs.append(run_from_outcome(task, "integrator", outcome, started))
                 remaining = [f for f in conflicts if self._has_markers(path / f)]
                 if remaining:
                     await self.git.abort_merge(path)
@@ -514,8 +531,8 @@ class TaskExecutor:
             merged_tasks=merged,
             conflicts_resolved=resolved,
         )
-        events += [self._check_event(task, c) for c in checks.runs]
-        events += [self._agent_event(task, r) for r in runs]
+        events += [check_event(task, c) for c in checks.runs]
+        events += [agent_event(task, r) for r in runs]
         return HandlerOutput(
             result=result,
             workspaces=[prepared.workspace],
@@ -561,66 +578,72 @@ class TaskExecutor:
         text = file.read_text(encoding="utf-8", errors="replace")
         return any(line.startswith(CONFLICT_MARKERS) for line in text.splitlines())
 
-    # ----------------------------------------------------------------- records
+    async def _repair(
+        self, wf: Workflow, task: Task, spec: RequirementSpecification
+    ) -> HandlerOutput:
+        """Fix verification blockers on top of the commit under verification (spec section 57).
 
-    def _run_from_outcome(
-        self, task: Task, agent_type: str, outcome: AgentOutcome, started: datetime
-    ) -> AgentRunRecord:
-        return self._run_record(
-            task, agent_type, outcome.prompt_version, outcome.attempts, outcome.tool_calls, started
-        )
-
-    @staticmethod
-    def _run_record(
-        task: Task,
-        agent_type: str,
-        prompt_version: str,
-        attempts: list,
-        tool_calls: list,
-        started: datetime,
-        error: str | None = None,
-    ) -> AgentRunRecord:
-        return AgentRunRecord(
-            run_id=new_id("run"),
-            workflow_id=task.workflow_id,
+        Works in its own worktree/branch, then fast-forwards the integration branch.
+        """
+        assert wf.execution is not None and wf.repository_path is not None
+        target = wf.execution.target_commit or wf.execution.base_commit
+        prepared = await self.worktrees.create(
+            workflow_id=wf.workflow_id,
             task_id=task.task_id,
-            agent_type=agent_type,
-            prompt_version=prompt_version,
-            status="failed" if error else "completed",
-            attempts=attempts,
-            tool_calls=tool_calls,
-            error=error,
-            started_at=started,
-            completed_at=utcnow(),
+            key=task.key,
+            repository_path=wf.repository_path,
+            base_commit=target,
         )
-
-    @staticmethod
-    def _agent_event(task: Task, run: AgentRunRecord) -> Event:
-        return Event(
-            event_type=EventType.AGENT_RUN_COMPLETED
-            if run.status == "completed"
-            else EventType.AGENT_RUN_FAILED,
-            topic=Topics.AGENT,
-            workflow_id=task.workflow_id,
+        checks = CheckRunner(
+            prepared.path, self.settings.check_timeout_seconds, exclude_path=sys.prefix
+        )
+        ctx = AgentRuntimeContext(
+            workflow_id=wf.workflow_id,
             task_id=task.task_id,
-            payload={
-                "run_id": run.run_id,
-                "agent_type": run.agent_type,
-                "prompt_version": run.prompt_version,
-                "providers": [f"{a.provider}:{a.model}:{a.status}" for a in run.attempts],
-                "tool_calls": len(run.tool_calls),
-                "error": run.error,
-            },
+            repository_root=prepared.path,
+            file_scope=task.file_scope,
+            checks=checks,
         )
-
-    @staticmethod
-    def _check_event(task: Task, check: CheckRun) -> Event:
-        return task_event(
-            task,
-            EventType.CHECK_COMPLETED,
-            kind=check.kind,
-            command=check.command,
-            passed=check.passed,
-            exit_code=check.exit_code,
-            duration_ms=check.duration_ms,
+        started = utcnow()
+        outcome = await self.gateway.implement_subtask(
+            ctx,
+            ImplementationRequest(
+                specification=spec,
+                task=task,
+                available_checks=[k for k in checks.available() if k != "setup"],
+            ),
+        )
+        risks = list(outcome.output.risks)
+        changed = await self.git.changed_files(prepared.path)
+        outside = [f for f in changed if not globs.matches_any(f, task.file_scope)]
+        if outside:
+            await self.git.discard_paths(prepared.path, outside)
+            risks.append(f"discarded {len(outside)} out-of-scope change(s)")
+        commit = await self.git.commit_all(
+            prepared.path,
+            f"forgeflow({task.key}): repair round {task.round}\n\n"
+            f"Workflow: {wf.workflow_id}\nTask: {task.task_id}",
+        )
+        if commit is None:
+            risks.append("the repair made no file changes")
+        elif wf.execution.integration_branch:
+            integration = self.worktrees.path_for(wf.workflow_id, "integration")
+            await self.git.fast_forward(integration, commit)
+        result = TaskResult(
+            summary=outcome.output.summary,
+            files_changed=[f for f in changed if f not in outside],
+            commit=commit,
+            branch=prepared.workspace.branch,
+            checks=checks.runs,
+            risks=risks,
+            next_actions=outcome.output.next_actions,
+        )
+        run = run_from_outcome(task, "developer_subagent", outcome, started)
+        events = [check_event(task, c) for c in checks.runs] + [agent_event(task, run)]
+        return HandlerOutput(
+            result=result,
+            workspaces=[prepared.workspace],
+            agent_runs=[run],
+            events=events,
+            workspace_id=prepared.workspace.workspace_id,
         )

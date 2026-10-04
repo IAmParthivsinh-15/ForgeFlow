@@ -49,6 +49,6 @@ def test_no_capabilities_yields_empty_plan():
     assert "No execution capabilities" in plan.rationale
 
 
-def test_stages_are_not_executable_in_milestone_one():
-    plan = plan_route(Caps(development=True))
-    assert plan.stages[0].implemented is False
+def test_all_capabilities_are_executable():
+    plan = plan_route(Caps(development=True, code_review=True, security=True, qa=True, ci=True))
+    assert all(s.implemented for s in plan.stages)

@@ -10,6 +10,7 @@ from forgeflow.platform.state.store import Commit, CommitResult, StoredEvent
 from forgeflow.schemas.events import Event
 from forgeflow.schemas.requirement import ClarificationQuestion, RequirementSpecification
 from forgeflow.schemas.task import Task, TaskStatus, Workspace
+from forgeflow.schemas.verification import A2AMessage
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 
 
@@ -22,6 +23,7 @@ class InMemoryWorkflowStore:
         self.agent_runs: dict[str, AgentRunRecord] = {}
         self.tasks: dict[str, Task] = {}
         self.workspaces: dict[str, Workspace] = {}
+        self.a2a: dict[str, A2AMessage] = {}
         self.counters: dict[str, int] = {}
         self.events: list[tuple[StoredEvent, bool]] = []
 
@@ -67,6 +69,8 @@ class InMemoryWorkflowStore:
                 self.agent_runs[run.run_id] = run.model_copy(deep=True)
             for ws in change.workspaces:
                 self.workspaces[ws.workspace_id] = ws.model_copy(deep=True)
+            for msg in change.a2a_messages:
+                self.a2a[msg.message_id] = msg.model_copy(deep=True)
             for event in change.events:
                 seq = self.counters.get(event.workflow_id, 0) + 1
                 self.counters[event.workflow_id] = seq
@@ -155,6 +159,10 @@ class InMemoryWorkflowStore:
             for w in sorted(self.workspaces.values(), key=lambda w: w.created_at)
             if workflow_id is None or w.workflow_id == workflow_id
         ]
+
+    async def list_a2a_messages(self, workflow_id: str) -> list[A2AMessage]:
+        items = [m for m in self.a2a.values() if m.workflow_id == workflow_id]
+        return sorted(items, key=lambda m: m.created_at)
 
     async def list_events(
         self, workflow_id: str, after_seq: int = 0, limit: int = 500

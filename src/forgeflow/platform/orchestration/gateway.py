@@ -12,20 +12,38 @@ from typing import Protocol
 
 from agents import AgentOutputSchema, Model
 
+from forgeflow.agents.ci import agent as ci_agent
+from forgeflow.agents.code_review import agent as code_review
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.agents.developer import agent as developer
 from forgeflow.agents.developer_subagent import agent as developer_subagent
 from forgeflow.agents.integrator import agent as integrator
 from forgeflow.agents.orchestrator import agent as orchestrator
+from forgeflow.agents.qa import agent as qa_agent
 from forgeflow.agents.requirement_analyzer import agent as requirement_analyzer
+from forgeflow.agents.security import agent as security_agent
 from forgeflow.models.executor import AgentExecutor
 from forgeflow.schemas.requirement import AnalyzerResult, ClarificationQuestion
 from forgeflow.schemas.requirement import RequirementSpecification as Spec
 from forgeflow.schemas.task import (
+    CheckRun,
     DevelopmentPlan,
     ImplementationReport,
     ResolutionReport,
     Task,
+)
+from forgeflow.schemas.verification import (
+    OWASP_TOP_10_2021,
+    A2AAnswer,
+    ChangeAnalysis,
+    CIAnalysis,
+    CIBuild,
+    QAAssessment,
+    ReviewFinding,
+    ReviewReport,
+    ScanResult,
+    SecurityAssessment,
+    SecurityFinding,
 )
 from forgeflow.schemas.workflow import IntakeAssessment, ProviderAttempt
 
@@ -65,6 +83,49 @@ class ConflictRequest:
 
 
 @dataclass
+class ReviewRequest:
+    specification: Spec
+    change: ChangeAnalysis
+    diff: str
+    round: int = 1
+    previous_findings: list[ReviewFinding] = field(default_factory=list)
+
+
+@dataclass
+class SecurityRequest:
+    specification: Spec
+    change: ChangeAnalysis
+    diff: str
+    scans: list[ScanResult]
+    owasp_edition: str
+    round: int = 1
+    previous_findings: list[SecurityFinding] = field(default_factory=list)
+
+
+@dataclass
+class QARequest:
+    specification: Spec
+    executed_checks: list[CheckRun]
+    available_checks: list[str]
+    round: int = 1
+
+
+@dataclass
+class CIRequest:
+    build: CIBuild
+    pipeline: str
+    change_summary: str
+
+
+@dataclass
+class A2ARequest:
+    specification: Spec
+    asker: str
+    question: str
+    context: str
+
+
+@dataclass
 class AgentOutcome[T]:
     output: T
     prompt_version: str
@@ -92,6 +153,26 @@ class AgentGateway(Protocol):
     async def resolve_conflicts(
         self, ctx: AgentRuntimeContext, request: ConflictRequest
     ) -> AgentOutcome[ResolutionReport]: ...
+
+    async def review_changes(
+        self, ctx: AgentRuntimeContext, request: ReviewRequest
+    ) -> AgentOutcome[ReviewReport]: ...
+
+    async def assess_security(
+        self, ctx: AgentRuntimeContext, request: SecurityRequest
+    ) -> AgentOutcome[SecurityAssessment]: ...
+
+    async def verify_acceptance(
+        self, ctx: AgentRuntimeContext, request: QARequest
+    ) -> AgentOutcome[QAAssessment]: ...
+
+    async def analyze_ci_failure(
+        self, ctx: AgentRuntimeContext, request: CIRequest
+    ) -> AgentOutcome[CIAnalysis]: ...
+
+    async def answer_a2a(
+        self, ctx: AgentRuntimeContext, request: A2ARequest
+    ) -> AgentOutcome[A2AAnswer]: ...
 
 
 def render_analysis_input(analysis: AnalysisRequest) -> str:
@@ -224,6 +305,119 @@ def render_conflict_input(req: ConflictRequest) -> str:
     )
 
 
+MAX_DIFF_IN_PROMPT = 30_000
+
+
+def _diff_excerpt(diff: str) -> str:
+    if not diff:
+        return "(no code changes in this workflow)"
+    if len(diff) <= MAX_DIFF_IN_PROMPT:
+        return diff
+    return diff[:MAX_DIFF_IN_PROMPT] + "\n... truncated; use view_diff for individual files"
+
+
+def _change_brief(change: ChangeAnalysis) -> str:
+    return change.model_dump_json(include={"domains", "files_by_domain", "risk", "review_focus"})
+
+
+def render_review_input(req: ReviewRequest) -> str:
+    lines = [
+        f"# Code review - round {req.round}",
+        "",
+        "# Requirement",
+        _spec_brief(req.specification),
+        "",
+        "# Change analysis",
+        _change_brief(req.change),
+    ]
+    if req.previous_findings:
+        lines += ["", "# Findings from the previous round (verify each was addressed)"]
+        lines += [f"- [{f.severity}] {f.file}:{f.line} {f.message}" for f in req.previous_findings]
+    lines += ["", "# Diff", _diff_excerpt(req.diff)]
+    return "\n".join(lines)
+
+
+def render_security_input(req: SecurityRequest) -> str:
+    lines = [
+        f"# Security assessment - round {req.round} - OWASP Top 10 ({req.owasp_edition})",
+        *[f"- {k}: {v}" for k, v in OWASP_TOP_10_2021.items()],
+        "",
+        "# Requirement",
+        _spec_brief(req.specification),
+        "",
+        "# Change analysis",
+        _change_brief(req.change),
+        "",
+        "# Scanner results",
+    ]
+    for scan in req.scans:
+        lines.append(f"## {scan.tool}: {scan.status} {scan.detail}".rstrip())
+        lines += [
+            f"- [{f.severity}] {f.category} {f.rule_id} {f.file}:{f.line} {f.message}"
+            for f in scan.findings[:50]
+        ]
+    if req.previous_findings:
+        lines += ["", "# Findings from the previous round (verify each was fixed)"]
+        lines += [
+            f"- [{f.severity}] {f.category} {f.file}:{f.line} {f.impact}"
+            for f in req.previous_findings
+        ]
+    lines += ["", "# Diff", _diff_excerpt(req.diff)]
+    return "\n".join(lines)
+
+
+def render_qa_input(req: QARequest) -> str:
+    lines = [f"# QA - round {req.round}", "", "# Acceptance criteria"]
+    lines += [
+        f"- {ac.id} ({ac.verification}): {ac.description}"
+        for ac in req.specification.acceptance_criteria
+    ]
+    lines += ["", "# Checks already executed by ForgeFlow on this commit"]
+    if not req.executed_checks:
+        lines.append("- none (no test command is configured or detected)")
+    for c in req.executed_checks:
+        status = "TIMED OUT" if c.timed_out else ("PASSED" if c.passed else "FAILED")
+        lines.append(f"## {c.kind}: `{c.command}` {status} (exit {c.exit_code})")
+        lines.append(c.output[-3000:])
+    lines += ["", "# Available checks", ", ".join(req.available_checks) or "none"]
+    return "\n".join(lines)
+
+
+def render_ci_input(req: CIRequest) -> str:
+    stages = ", ".join(f"{s.name}={s.status}" for s in req.build.stages) or "unknown"
+    return "\n".join(
+        [
+            f"# CI build {req.build.job} #{req.build.build_number}: {req.build.status}",
+            f"commit: {req.build.commit}",
+            f"stages: {stages}",
+            "",
+            "# Change",
+            req.change_summary,
+            "",
+            "# Pipeline",
+            req.pipeline,
+            "",
+            "# Console log (tail)",
+            req.build.log_tail[-12_000:],
+        ]
+    )
+
+
+def render_a2a_input(req: A2ARequest) -> str:
+    return "\n".join(
+        [
+            f"# A2A question from {req.asker}",
+            req.question,
+            "",
+            "# Context",
+            req.context or "(none)",
+            "",
+            "# Requirement",
+            f"{req.specification.summary} - {req.specification.goal}",
+        ]
+    )
+
+
 def render_intake_input(request: str, repository_attached: bool) -> str:
     return (
         f"# User request\n{request}\n\n# Repository\n"
@@ -320,4 +514,60 @@ class SdkAgentGateway:
         )
         return AgentOutcome(
             run.output, integrator.prompt().version, run.attempts, list(ctx.tool_calls)
+        )
+
+    async def _run(self, module, factory, profile_text, output_type, ctx):
+        def build(model: Model, output: AgentOutputSchema | None, extra: str):
+            return factory(model, output, extra)
+
+        run = await self.executor.run_structured(
+            profile=module.MODEL_PROFILE,
+            build_agent=build,
+            input_text=profile_text,
+            output_type=output_type,
+            context=ctx,
+        )
+        return AgentOutcome(run.output, module.prompt().version, run.attempts, list(ctx.tool_calls))
+
+    async def review_changes(
+        self, ctx: AgentRuntimeContext, request: ReviewRequest
+    ) -> AgentOutcome[ReviewReport]:
+        return await self._run(
+            code_review,
+            code_review.create_code_review_agent,
+            render_review_input(request),
+            ReviewReport,
+            ctx,
+        )
+
+    async def assess_security(
+        self, ctx: AgentRuntimeContext, request: SecurityRequest
+    ) -> AgentOutcome[SecurityAssessment]:
+        return await self._run(
+            security_agent,
+            security_agent.create_security_agent,
+            render_security_input(request),
+            SecurityAssessment,
+            ctx,
+        )
+
+    async def verify_acceptance(
+        self, ctx: AgentRuntimeContext, request: QARequest
+    ) -> AgentOutcome[QAAssessment]:
+        return await self._run(
+            qa_agent, qa_agent.create_qa_agent, render_qa_input(request), QAAssessment, ctx
+        )
+
+    async def analyze_ci_failure(
+        self, ctx: AgentRuntimeContext, request: CIRequest
+    ) -> AgentOutcome[CIAnalysis]:
+        return await self._run(
+            ci_agent, ci_agent.create_ci_agent, render_ci_input(request), CIAnalysis, ctx
+        )
+
+    async def answer_a2a(
+        self, ctx: AgentRuntimeContext, request: A2ARequest
+    ) -> AgentOutcome[A2AAnswer]:
+        return await self._run(
+            developer, developer.create_developer_agent, render_a2a_input(request), A2AAnswer, ctx
         )

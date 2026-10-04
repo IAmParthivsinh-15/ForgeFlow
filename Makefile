@@ -32,10 +32,10 @@ typecheck:
 	uv run mypy
 
 compose-up:
-	docker compose up --build -d
+	docker compose --profile ci up --build -d
 
 compose-down:
-	docker compose down
+	docker compose --profile ci down
 
 logs:
 	docker compose logs -f platform-api orchestrator-worker agent-worker

@@ -1,0 +1,172 @@
+# ForgeFlow bundled Semgrep rules (run offline: --metrics=off, no registry).
+# Each rule carries an OWASP Top 10 (2021) category in metadata.owasp.
+# Extend this file, or add more *.yaml files to this folder, to tailor the scan.
+
+rules:
+  # ------------------------------------------------------------------ A03 Injection
+  - id: python-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: subprocess call with shell=True; pass an argument list and shell=False.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-78"] }
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+
+  - id: python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval/exec on dynamic input allows code injection.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-95"] }
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+      - pattern-not: eval("...")
+      - pattern-not: exec("...")
+
+  - id: python-sql-string-formatting
+    languages: [python]
+    severity: ERROR
+    message: SQL built with string formatting; use parameterised queries.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-89"] }
+    pattern-either:
+      - pattern: $CUR.execute(f"...")
+      - pattern: $CUR.execute("..." % ...)
+      - pattern: $CUR.execute("..." + ...)
+      - pattern: $CUR.execute("...".format(...))
+
+  - id: js-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval / new Function on dynamic input allows code injection.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-95"] }
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: new Function(...)
+
+  - id: js-child-process-exec
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: child_process.exec runs a shell; prefer execFile/spawn with an argument array.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-78"] }
+    pattern-either:
+      - pattern: require("child_process").exec(...)
+      - pattern: child_process.exec(...)
+      - pattern: exec(`...${$X}...`, ...)
+
+  - id: js-dangerous-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Assigning HTML from data enables XSS; escape or use textContent.
+    metadata: { owasp: ["A03:2021 - Injection"], cwe: ["CWE-79"] }
+    pattern-either:
+      - pattern: $EL.innerHTML = $X
+      - pattern: $EL.outerHTML = $X
+      - pattern: document.write($X)
+
+  # ------------------------------------------------------ A02 Cryptographic Failures
+  - id: python-weak-hash
+    languages: [python]
+    severity: WARNING
+    message: MD5/SHA1 are unsuitable for passwords or integrity; use SHA-256+ or a password hash (bcrypt/argon2).
+    metadata: { owasp: ["A02:2021 - Cryptographic Failures"], cwe: ["CWE-328"] }
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: python-tls-verify-disabled
+    languages: [python]
+    severity: ERROR
+    message: TLS certificate verification disabled.
+    metadata: { owasp: ["A02:2021 - Cryptographic Failures"], cwe: ["CWE-295"] }
+    pattern: $LIB.$METHOD(..., verify=False, ...)
+
+  - id: python-insecure-random-token
+    languages: [python]
+    severity: WARNING
+    message: random module is not cryptographically secure; use secrets for tokens.
+    metadata: { owasp: ["A02:2021 - Cryptographic Failures"], cwe: ["CWE-338"] }
+    patterns:
+      - pattern-either:
+          - pattern: random.random()
+          - pattern: random.randint(...)
+          - pattern: random.choice(...)
+      - pattern-inside: |
+          def $FUNC(...):
+            ...
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (?i).*(token|secret|password|reset|otp|nonce|key).*
+
+  # ------------------------------------------- A07 Identification & Authentication
+  - id: hardcoded-credential-assignment
+    languages: [python, javascript, typescript]
+    severity: ERROR
+    message: Hard-coded credential; load secrets from the environment or a secret manager.
+    metadata: { owasp: ["A07:2021 - Identification and Authentication Failures"], cwe: ["CWE-798"] }
+    patterns:
+      - pattern: $NAME = "$VALUE"
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(password|passwd|secret|api_?key|token|private_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^.{8,}$
+
+  - id: jwt-decode-without-verification
+    languages: [python]
+    severity: ERROR
+    message: JWT decoded without signature verification.
+    metadata: { owasp: ["A07:2021 - Identification and Authentication Failures"], cwe: ["CWE-347"] }
+    pattern-either:
+      - pattern: jwt.decode(..., verify=False, ...)
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+
+  # ------------------------------------------- A08 Software and Data Integrity
+  - id: python-unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: Deserialising untrusted data can execute code; use json or yaml.safe_load.
+    metadata: { owasp: ["A08:2021 - Software and Data Integrity Failures"], cwe: ["CWE-502"] }
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: yaml.load($X)
+      - pattern: yaml.unsafe_load(...)
+
+  # ---------------------------------------------- A05 Security Misconfiguration
+  - id: flask-debug-enabled
+    languages: [python]
+    severity: WARNING
+    message: Debug mode exposes an interactive debugger; disable it outside development.
+    metadata: { owasp: ["A05:2021 - Security Misconfiguration"], cwe: ["CWE-489"] }
+    pattern: $APP.run(..., debug=True, ...)
+
+  - id: cors-allow-all-with-credentials
+    languages: [python]
+    severity: WARNING
+    message: CORS allows any origin; restrict allowed origins.
+    metadata: { owasp: ["A05:2021 - Security Misconfiguration"], cwe: ["CWE-942"] }
+    pattern: $X.add_middleware(..., allow_origins=["*"], ...)
+
+  # --------------------------------------------------------------------- A10 SSRF
+  - id: python-request-to-user-url
+    languages: [python]
+    severity: WARNING
+    message: Outbound request to a URL taken from the request; validate it against an allowlist.
+    metadata: { owasp: ["A10:2021 - Server-Side Request Forgery"], cwe: ["CWE-918"] }
+    pattern-either:
+      - pattern: requests.$M(request.$ATTR.get(...), ...)
+      - pattern: requests.$M(request.$ATTR[...], ...)
+      - pattern: httpx.$M(request.$ATTR.get(...), ...)
+
+  # ---------------------------------------------------- A01 Broken Access Control
+  - id: python-path-traversal-open
+    languages: [python]
+    severity: WARNING
+    message: File path built from request input; normalise it and confine it to a base directory.
+    metadata: { owasp: ["A01:2021 - Broken Access Control"], cwe: ["CWE-22"] }
+    pattern-either:
+      - pattern: open(request.$ATTR.get(...), ...)
+      - pattern: open(os.path.join(..., request.$ATTR.get(...)), ...)

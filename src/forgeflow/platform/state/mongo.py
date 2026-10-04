@@ -16,6 +16,7 @@ from forgeflow.platform.state.store import Commit, CommitResult, StoredEvent
 from forgeflow.schemas.events import Event
 from forgeflow.schemas.requirement import ClarificationQuestion, RequirementSpecification
 from forgeflow.schemas.task import Task, TaskStatus, Workspace
+from forgeflow.schemas.verification import A2AMessage
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 
 
@@ -41,6 +42,7 @@ class MongoWorkflowStore:
         self.tasks = self.db["tasks"]
         self.workspaces = self.db["workspaces"]
         self.counters = self.db["counters"]
+        self.a2a = self.db["a2a_messages"]
         self.events = self.db["events"]
 
     async def ensure_indexes(self) -> None:
@@ -53,6 +55,7 @@ class MongoWorkflowStore:
         await self.tasks.create_index([("workflow_id", ASCENDING), ("created_at", ASCENDING)])
         await self.tasks.create_index([("status", ASCENDING), ("updated_at", ASCENDING)])
         await self.workspaces.create_index([("workflow_id", ASCENDING)])
+        await self.a2a.create_index([("workflow_id", ASCENDING), ("created_at", ASCENDING)])
         await self.events.create_index(
             [("workflow_id", ASCENDING), ("seq", ASCENDING)], unique=True
         )
@@ -127,6 +130,11 @@ class MongoWorkflowStore:
         for ws in change.workspaces:
             await self.workspaces.replace_one(
                 {"_id": ws.workspace_id}, _doc(ws, "workspace_id"), upsert=True, session=session
+            )
+
+        for msg in change.a2a_messages:
+            await self.a2a.replace_one(
+                {"_id": msg.message_id}, _doc(msg, "message_id"), upsert=True, session=session
             )
 
         by_workflow: dict[str, list[Event]] = {}
@@ -228,6 +236,10 @@ class MongoWorkflowStore:
         query = {"workflow_id": workflow_id} if workflow_id else {}
         cursor = self.workspaces.find(query).sort("created_at", ASCENDING)
         return [Workspace.model_validate(_strip(d)) async for d in cursor]
+
+    async def list_a2a_messages(self, workflow_id: str) -> list[A2AMessage]:
+        cursor = self.a2a.find({"workflow_id": workflow_id}).sort("created_at", ASCENDING)
+        return [A2AMessage.model_validate(_strip(d)) async for d in cursor]
 
     async def list_events(
         self, workflow_id: str, after_seq: int = 0, limit: int = 500

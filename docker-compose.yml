@@ -1,8 +1,10 @@
-# ForgeFlow local development stack - Phase 0, Milestones 1 and 2.
+# ForgeFlow local development stack - Phase 0 and Milestones 1-3.
 #
-#   docker compose up --build
+#   docker compose --profile ci up --build -d     # with local Jenkins for the CI stage
+#   docker compose up --build -d                  # without Jenkins (CI stage pauses)
 #
 # UI: http://localhost:8080   API: http://localhost:8000/docs   Health: http://localhost:8000/health
+# Jenkins (profile ci): http://localhost:8081  user/password from JENKINS_USER/JENKINS_PASSWORD
 
 x-python-service: &python-service
   build:
@@ -19,6 +21,11 @@ x-python-service: &python-service
     WORKSPACES_ROOT: /workspaces
     # Interpolated from the shell or .env, so `FAKE_LLM=true docker compose up` works too.
     FAKE_LLM: ${FAKE_LLM:-false}
+    JENKINS_URL: http://jenkins:8080
+    JENKINS_PUBLIC_URL: http://localhost:8081
+    JENKINS_USER: ${JENKINS_USER:-forgeflow}
+    JENKINS_PASSWORD: ${JENKINS_PASSWORD:-forgeflow-local}
+    JENKINS_REPOS_ROOT: /repos
   volumes:
     # Read-write: ForgeFlow creates forgeflow/* branches and worktrees (never pushes).
     - ./repos:/repos
@@ -100,6 +107,27 @@ services:
     <<: *python-service
     command: ["python", "-m", "forgeflow.apps.agent_worker.main"]
 
+  # Local CI (spec section 56). Optional: start with `--profile ci`.
+  jenkins:
+    profiles: ["ci"]
+    build:
+      context: docker/jenkins
+    ports: ["8081:8080"]
+    environment:
+      JENKINS_ADMIN_ID: ${JENKINS_USER:-forgeflow}
+      JENKINS_ADMIN_PASSWORD: ${JENKINS_PASSWORD:-forgeflow-local}
+    volumes:
+      - jenkins-home:/var/jenkins_home
+      # Pipelines clone the commit under verification from here (read-only).
+      - ./repos:/repos:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/login > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+
   frontend:
     build:
       context: .
@@ -112,3 +140,4 @@ services:
 volumes:
   mongo-data:
   kafka-data:
+  jenkins-home:

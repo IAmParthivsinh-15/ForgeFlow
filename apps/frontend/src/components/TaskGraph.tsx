@@ -50,7 +50,12 @@ function TaskNode({ data }: NodeProps<Node<TaskNodeData>>) {
         {task.kind === "implement" ? (task.file_scope.join(", ") || "no scope") : task.agent_type.replace("_", " ")}
       </div>
       <div className="mt-0.5 text-[11px] opacity-70">
-        {task.wait_reason ?? (files !== undefined ? `${files} file(s) changed` : `attempt ${task.attempt}/${task.max_attempts}`)}
+        {task.wait_reason ??
+          (task.result?.verdict
+            ? `${task.result.verdict}${task.result.blocking ? " · blocking" : ""}`
+            : files !== undefined
+              ? `${files} file(s) changed`
+              : `attempt ${task.attempt}/${task.max_attempts}`)}
       </div>
       <Handle type="source" position={Position.Right} className="!bg-slate-400" />
     </div>
@@ -58,6 +63,28 @@ function TaskNode({ data }: NodeProps<Node<TaskNodeData>>) {
 }
 
 const nodeTypes = { task: TaskNode };
+
+const VERIFICATION = new Set(["review", "security", "qa", "ci"]);
+
+/**
+ * Edges to draw: real dependencies plus the phase order the scheduler enforces.
+ * Subtasks follow planning, a verification round follows integration (or the previous
+ * repair), and a repair follows the round whose findings it fixes.
+ */
+export function visualDeps(t: Task, tasks: Task[]): string[] {
+  if (t.dependencies.length) return t.dependencies;
+  const byKind = (kind: string, round?: number) =>
+    tasks.filter((x) => x.kind === kind && (round === undefined || x.round === round));
+  if (t.kind === "implement") return byKind("decompose").map((x) => x.task_id);
+  if (VERIFICATION.has(t.kind)) {
+    const before = t.round > 1 ? byKind("repair", t.round - 1) : byKind("integrate");
+    return before.map((x) => x.task_id);
+  }
+  if (t.kind === "repair") {
+    return tasks.filter((x) => VERIFICATION.has(x.kind) && x.round === t.round).map((x) => x.task_id);
+  }
+  return [];
+}
 
 /** Columns = dependency depth, so parallel tasks stack vertically in the same column. */
 function layout(tasks: Task[]): Map<string, { x: number; y: number }> {
@@ -67,10 +94,8 @@ function layout(tasks: Task[]): Map<string, { x: number; y: number }> {
     if (depth.has(t.task_id)) return depth.get(t.task_id)!;
     if (seen.has(t.task_id)) return 0;
     seen.add(t.task_id);
-    const deps = t.dependencies.map((d) => byId.get(d)).filter((d): d is Task => !!d);
-    // Subtasks without dependencies still come after the planning task that created them.
-    const implicit = t.kind !== "decompose" && deps.length === 0 ? 1 : 0;
-    const d = Math.max(implicit, ...deps.map((x) => depthOf(x, seen) + 1));
+    const deps = visualDeps(t, tasks).map((d) => byId.get(d)).filter((d): d is Task => !!d);
+    const d = Math.max(0, ...deps.map((x) => depthOf(x, seen) + 1));
     depth.set(t.task_id, d);
     return d;
   };
@@ -101,7 +126,6 @@ export function TaskGraph({
 }) {
   const { nodes, edges, height } = useMemo(() => {
     const positions = layout(tasks);
-    const decompose = tasks.find((t) => t.kind === "decompose");
     const nodes: Node<TaskNodeData>[] = tasks.map((task) => ({
       id: task.task_id,
       type: "task",
@@ -111,12 +135,7 @@ export function TaskGraph({
     }));
     const edges: Edge[] = [];
     for (const task of tasks) {
-      const sources = task.dependencies.length
-        ? task.dependencies
-        : task.kind !== "decompose" && decompose
-          ? [decompose.task_id]
-          : [];
-      for (const source of sources) {
+      for (const source of visualDeps(task, tasks)) {
         edges.push({
           id: `${source}->${task.task_id}`,
           source,

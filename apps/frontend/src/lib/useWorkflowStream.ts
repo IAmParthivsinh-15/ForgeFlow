@@ -20,6 +20,9 @@ export function useWorkflowStream(workflowId: string) {
       );
       queryClient.invalidateQueries({ queryKey: ["workflow", workflowId] });
       queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      if (event.event_type === "a2a.exchange") {
+        queryClient.invalidateQueries({ queryKey: ["a2a", workflowId] });
+      }
     };
     // Named SSE events (event: <type>) do not reach onmessage, so listen generically.
     const types = [
@@ -48,6 +51,11 @@ export function useWorkflowStream(workflowId: string) {
       "workspace.created",
       "test.completed",
       "integration.conflict",
+      "verification.round_started",
+      "repair.requested",
+      "workflow.awaiting_decision",
+      "workflow.completed",
+      "a2a.exchange",
     ];
     types.forEach((t) => source.addEventListener(t, onEvent as EventListener));
     source.onmessage = onEvent;

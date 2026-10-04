@@ -45,6 +45,16 @@ function describe(event: WorkflowEvent): string {
       return `${p.kind} ${p.passed ? "passed" : "failed"}: ${p.command}`;
     case "integration.conflict":
       return `Merge conflict integrating ${p.incoming}: ${(p.files as string[]).join(", ")}`;
+    case "verification.round_started":
+      return `Verification round ${p.round}: ${(p.stages as string[]).join(", ")}`;
+    case "repair.requested":
+      return `Repair round ${p.round} requested (attempt ${p.attempt})`;
+    case "workflow.awaiting_decision":
+      return "Repair limit reached; waiting for your decision";
+    case "workflow.completed":
+      return `Workflow completed: ${p.outcome}`;
+    case "a2a.exchange":
+      return `A2A ${p.sender} → ${p.receiver}: ${p.request} (${p.status})`;
     case "workspace.created":
       return `${p.key} worktree ready on ${p.branch}`;
     case "task.ready":

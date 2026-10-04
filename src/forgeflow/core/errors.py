@@ -49,3 +49,9 @@ class InvalidTaskGraph(ForgeFlowError):
 
 class MergeConflictUnresolved(ForgeFlowError):
     """Integration could not resolve a merge conflict."""
+
+
+class CIUnavailable(ForgeFlowError):
+    """The CI system could not be reached or rejected the request; worth retrying."""
+
+    retryable = True

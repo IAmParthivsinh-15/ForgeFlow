@@ -41,6 +41,11 @@ class EventType:
     WORKSPACE_CREATED = "workspace.created"
     CHECK_COMPLETED = "test.completed"
     INTEGRATION_CONFLICT = "integration.conflict"
+    VERIFICATION_ROUND_STARTED = "verification.round_started"
+    REPAIR_REQUESTED = "repair.requested"
+    WORKFLOW_AWAITING_DECISION = "workflow.awaiting_decision"
+    WORKFLOW_COMPLETED = "workflow.completed"
+    A2A_EXCHANGE = "a2a.exchange"
 
 
 class Topics:

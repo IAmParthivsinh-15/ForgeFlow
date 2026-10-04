@@ -26,6 +26,7 @@ from forgeflow.tools.git.client import GitClient
 
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 BRANCH_PREFIX = "forgeflow"
+DETACHED = "(detached)"
 
 LockFactory = Callable[[str], AbstractAsyncContextManager[None]]
 
@@ -93,6 +94,7 @@ class WorktreeManager:
         repository_path: str,
         base_commit: str,
         merge_commits: list[tuple[str, str]] | None = None,
+        detach: bool = False,
     ) -> PreparedWorkspace:
         """Create a fresh worktree from `base_commit`, then merge predecessor commits.
 
@@ -106,7 +108,12 @@ class WorktreeManager:
         async with self.locks(f"repository:{repository_path}"):
             await self._discard(repo, path, branch)  # retries start from a clean slate
             path.parent.mkdir(parents=True, exist_ok=True)
-            await self.git.add_worktree(repo, path, branch, base_commit)
+            if detach:
+                # Read-only verification checkouts need no branch of their own.
+                await self.git.add_detached_worktree(repo, path, base_commit)
+                branch = DETACHED
+            else:
+                await self.git.add_worktree(repo, path, branch, base_commit)
 
         prepared = PreparedWorkspace(
             workspace=Workspace(
@@ -139,7 +146,7 @@ class WorktreeManager:
             await self.git.remove_worktree(repo, Path(workspace.path))
             if Path(workspace.path).exists():
                 shutil.rmtree(workspace.path, ignore_errors=True)
-            if delete_branch:
+            if delete_branch and workspace.branch != DETACHED:
                 await self.git.delete_branch(repo, workspace.branch)
 
     async def _discard(self, repo: Path, path: Path, branch: str) -> None:

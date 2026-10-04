@@ -12,6 +12,7 @@ from redis.asyncio import Redis
 from forgeflow.core.config import Settings
 from forgeflow.models.config import ModelRegistry
 from forgeflow.models.executor import AgentExecutor
+from forgeflow.platform.ci.jenkins import CIProvider
 from forgeflow.platform.events.coordination import Coordinator
 from forgeflow.platform.execution.executor import TaskExecutor
 from forgeflow.platform.orchestration.execution import ExecutionService
@@ -23,6 +24,7 @@ from forgeflow.platform.state.mongo import MongoWorkflowStore
 from forgeflow.platform.state.store import WorkflowStore
 from forgeflow.platform.worktrees.manager import LockFactory, WorktreeManager
 from forgeflow.tools.git.client import GitClient
+from forgeflow.tools.security.scanners import ScannerSuite
 
 
 @dataclass
@@ -38,10 +40,20 @@ class Container:
     registry: ModelRegistry | None = None
     mongo: AsyncMongoClient | None = None
     redis: Redis | None = None
+    # None = defaults from settings (Jenkins, bundled scanners); tests inject fakes.
+    ci: CIProvider | None = None
+    scanners: ScannerSuite | None = None
 
     def executor(self, worker_id: str | None = None) -> TaskExecutor:
         return TaskExecutor(
-            self.store, self.gateway, self.worktrees, self.git, self.settings, worker_id
+            self.store,
+            self.gateway,
+            self.worktrees,
+            self.git,
+            self.settings,
+            worker_id,
+            ci=self.ci,
+            scanners=self.scanners,
         )
 
     async def close(self) -> None:

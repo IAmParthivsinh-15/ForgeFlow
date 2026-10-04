@@ -68,6 +68,27 @@ class Settings(BaseSettings):
     git_author_name: str = "ForgeFlow"
     git_author_email: str = "forgeflow@localhost"
 
+    # --- Milestone 3: verification ------------------------------------------------------
+    # Automatic fix rounds before the workflow waits for a human (spec section 57).
+    max_repair_attempts: int = Field(default=2, ge=0)
+    owasp_edition: str = "2021"
+    semgrep_rules_path: Path = Path("config/semgrep")
+    scanner_timeout_seconds: float = Field(default=300, gt=0)
+    # A2A: bounded agent-to-agent questions (spec section 186).
+    a2a_timeout_seconds: float = Field(default=180, gt=0)
+    a2a_max_per_run: int = Field(default=3, ge=0)
+    # Jenkins CI (spec section 56). Local instance from `docker compose --profile ci`.
+    jenkins_url: str = "http://localhost:8081"
+    # Address shown to people (links in the UI and report); defaults to jenkins_url.
+    jenkins_public_url: str | None = None
+    jenkins_user: str = "forgeflow"
+    # Default only matches the local compose Jenkins; override via JENKINS_PASSWORD.
+    jenkins_password: str = "forgeflow-local"  # noqa: S105
+    # Path where Jenkins sees the repositories (its own mount of ./repos).
+    jenkins_repos_root: str = "/repos"
+    ci_poll_interval_seconds: float = Field(default=3, gt=0)
+    ci_timeout_seconds: float = Field(default=1800, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:

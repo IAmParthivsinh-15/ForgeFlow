@@ -1,17 +1,24 @@
-"""Execution orchestration: the Task Graph Engine's scheduler (spec sections 16-20, 46, 48-49).
+"""Execution orchestration: the Task Graph Engine's scheduler (spec sections 16-20, 46-57).
 
 The orchestrator never runs code itself. It creates logical tasks, decides which
 are ready, serializes conflicting ones, and dispatches the rest by emitting
 `task.dispatched` events. Agent workers execute them (platform/execution).
 
-    workflow.routed (development required)
-        -> PLANNED -> EXECUTING, decompose task T1
+    workflow.routed
+        development routed  -> EXECUTING, decompose task T1 -> subtasks -> integration
+        otherwise           -> verification of the repository's current HEAD
+    verification round r    -> V{r}-review, V{r}-security, V{r}-qa, V{r}-ci
+                               (only stages in the route; dependencies follow the route)
+    round has blockers      -> repair task F{r}-repair (bounded) -> round r+1
+                               re-runs the failed stages, everything after them, and review
+    blockers after the limit -> PAUSED awaiting a human decision (accept / one more repair)
+    no blockers             -> final report -> COMPLETED
+
     tick():  FAILED(retryable) -> RETRYING -> READY (after backoff)
              PENDING -> READY when dependencies COMPLETED; -> BLOCKED if one is broken
              READY -> DISPATCHED (respecting conflicts and the parallelism limit)
-             integrate task active -> INTEGRATING
-             all tasks COMPLETED -> execution finished
-             nothing can progress -> PAUSED (retry or cancel)
+             workflow status follows the active stage
+             nothing can progress because a task failed -> PAUSED (retry or cancel)
 """
 
 from __future__ import annotations
@@ -25,21 +32,59 @@ from forgeflow.core.config import Settings
 from forgeflow.core.errors import ConcurrencyConflict, GitError, ValidationFailed
 from forgeflow.core.ids import utcnow
 from forgeflow.core.logging import bind_context, log_event
+from forgeflow.platform.orchestration.report import build_report
+from forgeflow.platform.orchestration.routing import plan_route
+from forgeflow.platform.orchestration.state_machine import EXECUTION_STATES
 from forgeflow.platform.orchestration.state_machine import ensure_transition as ensure_wf
 from forgeflow.platform.state.store import Commit, TaskWrite, WorkflowStore
 from forgeflow.platform.task_graph.conflicts import conflict_reason
 from forgeflow.platform.task_graph.graph import dependency_state
 from forgeflow.platform.task_graph.state_machine import ACTIVE, ensure_transition
+from forgeflow.platform.verification.change_analyzer import analyze_changes
 from forgeflow.platform.worktrees.manager import WorktreeManager
 from forgeflow.schemas.events import Event, EventType, Topics
-from forgeflow.schemas.task import Task, TaskStatus
-from forgeflow.schemas.workflow import ExecutionInfo, Workflow, WorkflowStatus
+from forgeflow.schemas.requirement import RequiredCapabilities
+from forgeflow.schemas.task import VERIFICATION_KINDS, Task, TaskStatus
+from forgeflow.schemas.workflow import (
+    Capability,
+    ExecutionInfo,
+    RouteStage,
+    Workflow,
+    WorkflowStatus,
+)
 from forgeflow.tools.git.client import GitClient
 
 logger = logging.getLogger(__name__)
 
-EXECUTING_STATES = (WorkflowStatus.EXECUTING, WorkflowStatus.INTEGRATING)
+EXECUTING_STATES = EXECUTION_STATES
 TICK_RETRIES = 5
+PROGRESSING = frozenset(
+    {TaskStatus.READY, TaskStatus.DISPATCHED, TaskStatus.RUNNING, TaskStatus.RETRYING}
+)
+STAGE_KIND: dict[Capability, str] = {
+    "code_review": "review",
+    "security": "security",
+    "qa": "qa",
+    "ci": "ci",
+}
+KIND_STAGE = {kind: stage for stage, kind in STAGE_KIND.items()}
+STATUS_FOR_STAGE: dict[str, WorkflowStatus] = {
+    "code_review": WorkflowStatus.REVIEWING,
+    "security": WorkflowStatus.REVIEWING,
+    "qa": WorkflowStatus.TESTING,
+    "ci": WorkflowStatus.CI,
+}
+# Workflow status while a task of this kind is active (highest priority first).
+_STATUS_BY_KIND = (
+    ("ci", WorkflowStatus.CI),
+    ("qa", WorkflowStatus.TESTING),
+    ("review", WorkflowStatus.REVIEWING),
+    ("security", WorkflowStatus.REVIEWING),
+    ("integrate", WorkflowStatus.INTEGRATING),
+    ("repair", WorkflowStatus.EXECUTING),
+    ("implement", WorkflowStatus.EXECUTING),
+    ("decompose", WorkflowStatus.EXECUTING),
+)
 
 
 def task_event(task: Task, event_type: str, **payload: Any) -> Event:
@@ -101,21 +146,21 @@ class ExecutionService:
     # ------------------------------------------------------------------ start
 
     async def start_execution(self, workflow_id: str) -> Workflow | None:
-        """Begin development for a PLANNED workflow whose route includes it. Idempotent."""
+        """Begin execution of a PLANNED workflow's routed stages. Idempotent."""
         bind_context(workflow_id=workflow_id)
         wf = await self.store.get_workflow(workflow_id)
         if wf.status != WorkflowStatus.PLANNED or wf.execution is not None or wf.route_plan is None:
             return None
-        stage = next((s for s in wf.route_plan.stages if s.capability == "development"), None)
-        if stage is None:
+        if not wf.route_plan.stages:
             return None
         revision = wf.revision
         now = self.clock()
 
         blocker = await self._repository_blocker(wf)
         if blocker is not None:
-            stage.status = "failed"
-            stage.reason = blocker
+            for stage in wf.route_plan.stages:
+                stage.status = "failed"
+                stage.reason = blocker
             event = workflow_event(
                 wf, EventType.WORKFLOW_EXECUTION_FINISHED, outcome="not_started", reason=blocker
             )
@@ -126,30 +171,37 @@ class ExecutionService:
             return result.workflow
 
         sha, ref = await self.git.head(self.worktrees.repository(wf.repository_path or ""))
-        wf.execution = ExecutionInfo(base_commit=sha, base_ref=ref, started_at=now)
-        stage.status = "running"
+        wf.execution = ExecutionInfo(
+            base_commit=sha, base_ref=ref, target_commit=sha, started_at=now
+        )
         events = [
             workflow_event(wf, EventType.WORKFLOW_EXECUTION_STARTED, base_commit=sha, base_ref=ref)
         ]
-        self._move_workflow(wf, WorkflowStatus.EXECUTING, events, now)
-
         changes = TaskChanges()
-        decompose = Task(
-            task_id=f"{wf.workflow_id}.T1",
-            workflow_id=wf.workflow_id,
-            key="T1",
-            title="Plan implementation subtasks",
-            kind="decompose",
-            agent_type="developer",
-            instructions="Decompose the approved requirement specification into subtasks.",
-            status=TaskStatus.PENDING,
-            max_attempts=self.settings.task_max_attempts,
-            priority=100,
-            created_at=now,
-            updated_at=now,
-        )
-        changes.insert(decompose)
-        changes.events.append(task_event(decompose, EventType.TASK_CREATED, kind="decompose"))
+        if self._has_development(wf):
+            self._set_stage(wf, "development", "running")
+            self._move_workflow(wf, WorkflowStatus.EXECUTING, events, now)
+            decompose = Task(
+                task_id=f"{wf.workflow_id}.T1",
+                workflow_id=wf.workflow_id,
+                key="T1",
+                title="Plan implementation subtasks",
+                kind="decompose",
+                agent_type="developer",
+                instructions="Decompose the approved requirement specification into subtasks.",
+                status=TaskStatus.PENDING,
+                max_attempts=self.settings.task_max_attempts,
+                priority=100,
+                created_at=now,
+                updated_at=now,
+            )
+            changes.insert(decompose)
+            changes.events.append(task_event(decompose, EventType.TASK_CREATED, kind="decompose"))
+        else:
+            # Verification-only request (review/audit/QA/CI of the current HEAD).
+            stages = self._verification_stages(wf)
+            self._move_workflow(wf, STATUS_FOR_STAGE[stages[0].capability], events, now)
+            self._create_round(wf, 1, stages, changes, events, now)
         await self.store.commit(
             Commit(
                 workflow=wf,
@@ -164,7 +216,7 @@ class ExecutionService:
 
     async def _repository_blocker(self, wf: Workflow) -> str | None:
         if not wf.repository_path:
-            return "Development requires a repository; none is attached to this workflow."
+            return "Execution requires a repository; none is attached to this workflow."
         try:
             repo = self.worktrees.repository(wf.repository_path)
         except ValidationFailed as exc:
@@ -199,14 +251,46 @@ class ExecutionService:
         if wf.status not in EXECUTING_STATES:
             return []
         tasks = await self.store.list_tasks(workflow_id)
-        by_id = {t.task_id: t for t in tasks}
         now = self.clock()
         changes = TaskChanges()
         wf_events: list[Event] = []
         wf_revision = wf.revision
-        wf_changed = False
+        snapshot = wf.model_dump()
 
-        # 1. Retry policy (spec section 49).
+        self._apply_retry_policy(tasks, changes, now)
+        self._resolve_dependencies(tasks, {t.task_id: t for t in tasks}, changes, now)
+
+        # Nothing left to run: either something failed for good, or the phase is done.
+        if not any(t.status in PROGRESSING or t.status == TaskStatus.PENDING for t in tasks):
+            if any(t.status != TaskStatus.COMPLETED for t in tasks):
+                self._pause_stuck(wf, tasks, wf_events, now)
+            else:
+                spec = await self.store.get_specification(workflow_id)
+                new = await self._advance(wf, tasks, spec, changes, wf_events, now)
+                tasks = tasks + new
+                self._resolve_dependencies(new, {t.task_id: t for t in tasks}, changes, now)
+
+        dispatched = (
+            self._dispatch(workflow_id, tasks, changes, now)
+            if wf.status in EXECUTING_STATES
+            else []
+        )
+        self._sync_status(wf, tasks, wf_events, now)
+
+        wf_changed = wf.model_dump() != snapshot
+        if changes.writes or wf_changed:
+            await self.store.commit(
+                Commit(
+                    workflow=wf if wf_changed else None,
+                    expected_revision=wf_revision,
+                    tasks=changes.task_writes(),
+                    events=changes.events + wf_events,
+                )
+            )
+        return dispatched
+
+    def _apply_retry_policy(self, tasks: list[Task], changes: TaskChanges, now: datetime) -> None:
+        """Spec section 49."""
         for t in tasks:
             if t.status == TaskStatus.FAILED and not t.terminal_failure:
                 backoff = timedelta(seconds=self.settings.task_retry_backoff_seconds * t.attempt)
@@ -224,7 +308,11 @@ class ExecutionService:
                 t.not_before = None
                 changes.move(t, TaskStatus.READY, EventType.TASK_READY, now, retry=True)
 
-        # 2. Dependency resolution (spec section 19).
+    @staticmethod
+    def _resolve_dependencies(
+        tasks: list[Task], by_id: dict[str, Task], changes: TaskChanges, now: datetime
+    ) -> None:
+        """Spec section 19."""
         for t in tasks:
             state = dependency_state(t, by_id)
             if t.status in (TaskStatus.PENDING, TaskStatus.READY) and state == "broken":
@@ -240,7 +328,10 @@ class ExecutionService:
             if t.status == TaskStatus.PENDING and dependency_state(t, by_id) == "satisfied":
                 changes.move(t, TaskStatus.READY, EventType.TASK_READY, now)
 
-        # 3. Conflict-aware dispatch (spec sections 20, 113, 185).
+    def _dispatch(
+        self, workflow_id: str, tasks: list[Task], changes: TaskChanges, now: datetime
+    ) -> list[str]:
+        """Conflict-aware dispatch (spec sections 20, 113, 185)."""
         active = [t for t in tasks if t.status in ACTIVE]
         dispatched: list[str] = []
         ready = sorted(
@@ -269,40 +360,340 @@ class ExecutionService:
             )
             active.append(t)
             dispatched.append(t.task_id)
+        return dispatched
 
-        # 4. Workflow progression.
+    def _sync_status(self, wf: Workflow, tasks: list[Task], events: list[Event], now: datetime):
+        """The workflow status follows the stage that is currently active."""
+        if wf.status not in EXECUTING_STATES:
+            return
+        active_kinds = {t.kind for t in tasks if t.status in ACTIVE}
+        for kind, status in _STATUS_BY_KIND:
+            if kind in active_kinds:
+                if wf.status != status:
+                    self._move_workflow(wf, status, events, now)
+                return
+
+    # -------------------------------------------------------------- progression
+
+    async def _advance(
+        self,
+        wf: Workflow,
+        tasks: list[Task],
+        spec: Any,
+        changes: TaskChanges,
+        events: list[Event],
+        now: datetime,
+    ) -> list[Task]:
+        """Everything so far is COMPLETED: start the next phase. Returns new tasks."""
+        assert wf.execution is not None and wf.route_plan is not None
+        ex = wf.execution
+        before = set(changes.writes)
+        verification = [t for t in tasks if t.kind in VERIFICATION_KINDS]
+        last_round = max((t.round for t in verification), default=0)
+        last_repair = max((t.round for t in tasks if t.kind == "repair"), default=0)
+
         integrate = next((t for t in tasks if t.kind == "integrate"), None)
-        if (
-            wf.status == WorkflowStatus.EXECUTING
-            and integrate is not None
-            and integrate.status in ACTIVE
-        ):
-            self._move_workflow(wf, WorkflowStatus.INTEGRATING, wf_events, now)
-            wf_changed = True
-
-        progressing = {
-            TaskStatus.READY,
-            TaskStatus.DISPATCHED,
-            TaskStatus.RUNNING,
-            TaskStatus.RETRYING,
-        }
-        if tasks and all(t.status == TaskStatus.COMPLETED for t in tasks):
-            self._finish(wf, integrate, wf_events, now)
-            wf_changed = True
-        elif tasks and not any(t.status in progressing for t in tasks):
-            self._pause_stuck(wf, tasks, wf_events, now)
-            wf_changed = True
-
-        if changes.writes or wf_changed:
-            await self.store.commit(
-                Commit(
-                    workflow=wf if wf_changed else None,
-                    expected_revision=wf_revision,
-                    tasks=changes.task_writes(),
-                    events=changes.events + wf_events,
+        if integrate and integrate.result and ex.integration_commit is None:
+            ex.integration_branch = integrate.result.branch
+            ex.integration_commit = integrate.result.commit
+            ex.target_commit = integrate.result.commit
+            self._set_stage(wf, "development", "completed")
+            events.append(
+                workflow_event(
+                    wf,
+                    EventType.WORKFLOW_EXECUTION_FINISHED,
+                    outcome="developed",
+                    integration_branch=ex.integration_branch,
+                    integration_commit=ex.integration_commit,
                 )
             )
-        return dispatched
+
+        if last_round == 0:
+            if self._has_development(wf):
+                await self._route_by_change(wf, events)
+            stages = self._verification_stages(wf)
+            if not stages:
+                self._finish(wf, spec, tasks, events, now)
+                return []
+            self._create_round(wf, 1, stages, changes, events, now)
+        elif last_repair == last_round:
+            repair = max((t for t in tasks if t.kind == "repair"), key=lambda t: t.round)
+            self._set_stage(wf, "development", "completed")
+            if repair.result and repair.result.commit:
+                ex.target_commit = repair.result.commit
+                ex.integration_commit = repair.result.commit
+            failed = {
+                KIND_STAGE[t.kind]
+                for t in verification
+                if t.round == last_round and t.result and t.result.blocking
+            }
+            self._create_round(
+                wf, last_round + 1, self._rerun_stages(wf, failed), changes, events, now
+            )
+        else:
+            round_tasks = [t for t in verification if t.round == last_round]
+            for t in round_tasks:
+                self._set_stage(
+                    wf,
+                    KIND_STAGE[t.kind],
+                    "failed" if t.result and t.result.blocking else "completed",
+                )
+            blockers = [t for t in round_tasks if t.result and t.result.blocking]
+            if not blockers or not self._has_development(wf):
+                # A pure review/audit reports its findings; there is nothing to repair.
+                self._finish(wf, spec, tasks, events, now)
+            elif ex.repair_attempts < self.settings.max_repair_attempts + ex.extra_repairs_allowed:
+                self._request_repair(wf, tasks, blockers, last_round, changes, events, now)
+            else:
+                self._await_decision(wf, blockers, events, now)
+        return [
+            w.task
+            for tid, w in changes.writes.items()
+            if tid not in before and w.expected_revision is None
+        ]
+
+    async def _route_by_change(self, wf: Workflow, events: list[Event]) -> None:
+        """Dynamic review routing (spec sections 2.5, 53, 189): add Security if needed."""
+        assert wf.execution is not None and wf.route_plan is not None
+        if any(s.capability == "security" for s in wf.route_plan.stages):
+            return
+        ex = wf.execution
+        if not ex.integration_commit or ex.integration_commit == ex.base_commit:
+            return
+        repo = self.worktrees.repository(wf.repository_path or "")
+        files = await self.git.files_between(repo, ex.base_commit, ex.integration_commit)
+        change = analyze_changes(files)
+        if "security" not in change.reviewers:
+            return
+        statuses = {s.capability: s.status for s in wf.route_plan.stages}
+        required = RequiredCapabilities(**{c: True for c in statuses}, security=True)
+        plan = plan_route(required)
+        for stage in plan.stages:
+            stage.status = statuses.get(stage.capability, "planned")  # type: ignore[assignment]
+            if stage.capability == "security":
+                domains = sorted(
+                    set(change.domains) & {"auth", "infra", "dependencies", "database"}
+                )
+                stage.reason = f"Added by the change analyzer: {', '.join(domains)} files changed."
+        plan.rationale += " (security added by the change analyzer)"
+        wf.route_plan = plan
+        events.append(
+            workflow_event(
+                wf,
+                EventType.WORKFLOW_ROUTED,
+                stages=[s.agent for s in plan.stages],
+                skipped=list(plan.skipped),
+                reason="change analyzer",
+            )
+        )
+
+    def _create_round(
+        self,
+        wf: Workflow,
+        round_no: int,
+        stages: list[RouteStage],
+        changes: TaskChanges,
+        events: list[Event],
+        now: datetime,
+    ) -> None:
+        assert wf.execution is not None
+        wf.execution.verification_round = round_no
+        included = {s.stage_id for s in stages}
+        ids = {s.stage_id: f"{wf.workflow_id}.V{round_no}-{s.capability}" for s in stages}
+        for stage in stages:
+            kind = STAGE_KIND[stage.capability]
+            task = Task(
+                task_id=ids[stage.stage_id],
+                workflow_id=wf.workflow_id,
+                key=f"V{round_no}-{stage.capability}",
+                title=f"{stage.agent.replace('_', ' ').title()} (round {round_no})",
+                kind=kind,  # type: ignore[arg-type]
+                agent_type=stage.agent,
+                instructions=stage.reason,
+                status=TaskStatus.PENDING,
+                dependencies=[ids[d] for d in stage.depends_on if d in included],
+                round=round_no,
+                max_attempts=self.settings.task_max_attempts,
+                priority=60,
+                created_at=now,
+                updated_at=now,
+            )
+            changes.insert(task)
+            changes.events.append(
+                task_event(task, EventType.TASK_CREATED, kind=kind, round=round_no)
+            )
+            self._set_stage(wf, stage.capability, "running")
+        events.append(
+            workflow_event(
+                wf,
+                EventType.VERIFICATION_ROUND_STARTED,
+                round=round_no,
+                stages=[s.capability for s in stages],
+                commit=wf.execution.target_commit,
+            )
+        )
+
+    def _rerun_stages(self, wf: Workflow, failed: set[Capability]) -> list[RouteStage]:
+        """Failed stages, every stage after the earliest of them, and code review."""
+        stages = self._verification_stages(wf)
+        order = [s.capability for s in stages]
+        first = min((order.index(c) for c in failed if c in order), default=0)
+        keep = set(order[first:]) | ({"code_review"} & set(order))
+        return [s for s in stages if s.capability in keep]
+
+    def _request_repair(
+        self,
+        wf: Workflow,
+        tasks: list[Task],
+        blockers: list[Task],
+        round_no: int,
+        changes: TaskChanges,
+        events: list[Event],
+        now: datetime,
+    ) -> None:
+        assert wf.execution is not None
+        wf.execution.repair_attempts += 1
+        reasons = [r for t in blockers if t.result for r in t.result.blocking_reasons]
+        lines = [
+            f"Fix the blocking verification findings from round {round_no}.",
+            "Change only what is needed to resolve them; keep all acceptance criteria working.",
+            "",
+        ]
+        for t in blockers:
+            assert t.result is not None
+            lines.append(f"## {KIND_STAGE[t.kind]}")
+            lines += [f"- {r}" for r in t.result.blocking_reasons]
+            if t.result.review:
+                lines += [
+                    f"  suggestion ({f.file}:{f.line}): {f.suggestion}"
+                    for f in t.result.review.findings
+                    if f.suggestion
+                ]
+            if t.result.security:
+                lines += [
+                    f"  remediation ({f.file}:{f.line}): {f.remediation}"
+                    for f in t.result.security.findings
+                    if f.severity in ("high", "critical")
+                ]
+            if t.result.ci and t.result.ci.analysis:
+                a = t.result.ci.analysis
+                lines += [f"  cause: {a.suspected_cause}", f"  fix: {a.recommended_fix}"]
+                lines += [f"  log: {e}" for e in a.evidence[:8]]
+            if t.result.qa:
+                lines += [
+                    f"  {c.id}: {c.evidence}" for c in t.result.qa.criteria if c.status == "FAIL"
+                ]
+            lines.append("")
+        scope = self._repair_scope(tasks, blockers)
+        repair = Task(
+            task_id=f"{wf.workflow_id}.F{round_no}-repair",
+            workflow_id=wf.workflow_id,
+            key=f"F{round_no}-repair",
+            title=f"Repair verification findings (round {round_no})",
+            kind="repair",
+            agent_type="developer_subagent",
+            instructions="\n".join(lines),
+            status=TaskStatus.PENDING,
+            file_scope=scope,
+            round=round_no,
+            max_attempts=self.settings.task_max_attempts,
+            priority=90,
+            created_at=now,
+            updated_at=now,
+        )
+        changes.insert(repair)
+        changes.events.append(
+            task_event(repair, EventType.TASK_CREATED, kind="repair", round=round_no)
+        )
+        self._set_stage(wf, "development", "running")
+        events.append(
+            workflow_event(
+                wf,
+                EventType.REPAIR_REQUESTED,
+                round=round_no,
+                attempt=wf.execution.repair_attempts,
+                reasons=reasons[:20],
+            )
+        )
+
+    @staticmethod
+    def _repair_scope(tasks: list[Task], blockers: list[Task]) -> list[str]:
+        scope: list[str] = []
+        for t in tasks:
+            if t.kind == "implement":
+                scope += t.file_scope
+            if t.kind in ("integrate", "repair") and t.result:
+                scope += t.result.files_changed
+        for t in blockers:
+            if t.result and t.result.review:
+                scope += [f.file for f in t.result.review.findings if f.file]
+            if t.result and t.result.security:
+                scope += [f.file for f in t.result.security.findings if f.file]
+        unique = list(dict.fromkeys(s for s in scope if s))
+        return unique or ["**"]
+
+    def _await_decision(
+        self, wf: Workflow, blockers: list[Task], events: list[Event], now: datetime
+    ) -> None:
+        """Repair limit reached (spec section 57: WAITING_FOR_HUMAN)."""
+        assert wf.execution is not None
+        reasons = [r for t in blockers if t.result for r in t.result.blocking_reasons]
+        wf.execution.awaiting_decision = True
+        wf.error = (
+            f"Blocking findings remain after {wf.execution.repair_attempts} repair round(s): "
+            + "; ".join(reasons[:5])
+        )
+        events.append(workflow_event(wf, EventType.WORKFLOW_AWAITING_DECISION, reasons=reasons))
+        self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
+
+    def _finish(
+        self, wf: Workflow, spec: Any, tasks: list[Task], events: list[Event], now: datetime
+    ) -> None:
+        assert wf.execution is not None
+        wf.execution.finished_at = now
+        wf.execution.awaiting_decision = False
+        wf.report = build_report(wf, spec, tasks)
+        events.append(
+            workflow_event(
+                wf,
+                EventType.WORKFLOW_COMPLETED,
+                outcome=wf.report.outcome,
+                summary=wf.report.summary,
+            )
+        )
+        self._move_workflow(wf, WorkflowStatus.COMPLETED, events, now)
+
+    def _pause_stuck(self, wf: Workflow, tasks: list[Task], events: list[Event], now: datetime):
+        failed = [t for t in tasks if t.status == TaskStatus.FAILED]
+        cancelled = [t for t in tasks if t.status == TaskStatus.CANCELLED]
+        parts = [f"{t.key} failed after {t.attempt} attempt(s): {t.error}" for t in failed]
+        parts += [f"{t.key} was cancelled" for t in cancelled]
+        wf.error = "; ".join(parts) or "No task can make progress."
+        for t in failed + cancelled:
+            capability = KIND_STAGE.get(t.kind, "development")
+            self._set_stage(wf, capability, "failed")
+        self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
+
+    # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _has_development(wf: Workflow) -> bool:
+        return bool(wf.route_plan) and any(
+            s.capability == "development"
+            for s in wf.route_plan.stages  # type: ignore[union-attr]
+        )
+
+    @staticmethod
+    def _verification_stages(wf: Workflow) -> list[RouteStage]:
+        assert wf.route_plan is not None
+        return [s for s in wf.route_plan.stages if s.capability in STAGE_KIND and s.implemented]
+
+    @staticmethod
+    def _set_stage(wf: Workflow, capability: str, status: str) -> None:
+        if wf.route_plan:
+            for stage in wf.route_plan.stages:
+                if stage.capability == capability:
+                    stage.status = status  # type: ignore[assignment]
 
     @staticmethod
     def _set_wait(task: Task, reason: str, changes: TaskChanges, now: datetime) -> None:
@@ -323,52 +714,46 @@ class ExecutionService:
             )
         )
 
-    def _finish(self, wf: Workflow, integrate: Task | None, events: list[Event], now: datetime):
-        assert wf.execution is not None and wf.route_plan is not None
-        if wf.status == WorkflowStatus.EXECUTING:
-            self._move_workflow(wf, WorkflowStatus.INTEGRATING, events, now)
-        result = integrate.result if integrate else None
-        wf.execution.integration_branch = result.branch if result else None
-        wf.execution.integration_commit = result.commit if result else None
-        wf.execution.finished_at = now
-        remaining = []
-        for stage in wf.route_plan.stages:
-            if stage.capability == "development":
-                stage.status = "completed"
-            elif stage.status == "planned":
-                remaining.append(stage.agent)
-        events.append(
-            workflow_event(
-                wf,
-                EventType.WORKFLOW_EXECUTION_FINISHED,
-                outcome="completed",
-                integration_branch=wf.execution.integration_branch,
-                integration_commit=wf.execution.integration_commit,
-                remaining_stages=remaining,
-            )
-        )
-        if remaining:
-            wf.execution.note = (
-                "Development is complete on the integration branch. Next stages are not "
-                f"implemented yet: {', '.join(remaining)}."
-            )
-            self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
-        else:
-            self._move_workflow(wf, WorkflowStatus.COMPLETED, events, now)
-
-    def _pause_stuck(self, wf: Workflow, tasks: list[Task], events: list[Event], now: datetime):
-        failed = [t for t in tasks if t.status == TaskStatus.FAILED]
-        cancelled = [t for t in tasks if t.status == TaskStatus.CANCELLED]
-        parts = [f"{t.key} failed after {t.attempt} attempt(s): {t.error}" for t in failed]
-        parts += [f"{t.key} was cancelled" for t in cancelled]
-        wf.error = "; ".join(parts) or "No task can make progress."
-        if wf.route_plan:
-            for stage in wf.route_plan.stages:
-                if stage.capability == "development":
-                    stage.status = "failed"
-        self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
-
     # ---------------------------------------------------------- manual control
+
+    async def resolve_decision(self, workflow_id: str, action: str) -> Workflow:
+        """Human decision on blockers left after the repair limit (spec section 30)."""
+        wf = await self.store.get_workflow(workflow_id)
+        if (
+            wf.status != WorkflowStatus.PAUSED
+            or not wf.execution
+            or not wf.execution.awaiting_decision
+        ):
+            raise ValidationFailed("this workflow is not waiting for a decision")
+        if action not in ("accept", "repair"):
+            raise ValidationFailed("action must be 'accept' or 'repair'")
+        now = self.clock()
+        revision = wf.revision
+        events: list[Event] = []
+        tasks = await self.store.list_tasks(workflow_id)
+        ex = wf.execution
+        ex.awaiting_decision = False
+        wf.error = None
+        if action == "accept":
+            last = max((t.round for t in tasks if t.kind in VERIFICATION_KINDS), default=0)
+            ex.accepted_risks = [
+                r
+                for t in tasks
+                if t.round == last and t.result and t.result.blocking
+                for r in t.result.blocking_reasons
+            ]
+            spec = await self.store.get_specification(workflow_id)
+            self._finish(wf, spec, tasks, events, now)
+            result = await self.store.commit(
+                Commit(workflow=wf, expected_revision=revision, events=events)
+            )
+            assert result.workflow is not None
+            return result.workflow
+        ex.extra_repairs_allowed += 1
+        self._move_workflow(wf, WorkflowStatus.EXECUTING, events, now)
+        await self.store.commit(Commit(workflow=wf, expected_revision=revision, events=events))
+        await self.tick(workflow_id)
+        return await self.store.get_workflow(workflow_id)
 
     async def retry_task(self, task_id: str) -> Task:
         task = await self.store.get_task(task_id)
@@ -377,6 +762,8 @@ class ExecutionService:
             raise ValidationFailed(f"only FAILED tasks can be retried (task is {task.status})")
         if wf.status not in (*EXECUTING_STATES, WorkflowStatus.PAUSED):
             raise ValidationFailed(f"workflow is {wf.status}; tasks cannot be retried")
+        if wf.execution and wf.execution.awaiting_decision:
+            raise ValidationFailed("the workflow is waiting for a decision on findings")
         now = self.clock()
         changes = TaskChanges()
         task.max_attempts = max(task.max_attempts, task.attempt + 1)
@@ -388,10 +775,7 @@ class ExecutionService:
         wf_changed = False
         if wf.status == WorkflowStatus.PAUSED:
             wf.error = None
-            if wf.route_plan:
-                for stage in wf.route_plan.stages:
-                    if stage.capability == "development":
-                        stage.status = "running"
+            self._set_stage(wf, KIND_STAGE.get(task.kind, "development"), "running")
             self._move_workflow(wf, WorkflowStatus.EXECUTING, events, now)
             wf_changed = True
         result = await self.store.commit(

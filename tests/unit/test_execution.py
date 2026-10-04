@@ -70,14 +70,30 @@ async def test_full_development_flow(container, git_repo):
 
     wf = await container.store.get_workflow(wf.workflow_id)
     tasks = tasks_by_key(await container.store.list_tasks(wf.workflow_id))
-    assert set(tasks) == {"T1", "T2-backend", "T3-frontend", "T4-docs", "T5-integration"}
+    assert set(tasks) == {
+        "T1",
+        "T2-backend",
+        "T3-frontend",
+        "T4-docs",
+        "T5-integration",
+        "V1-code_review",
+        "V1-security",
+        "V1-qa",
+        "V1-ci",
+    }
     assert all(t.status == TaskStatus.COMPLETED for t in tasks.values())
 
-    # Development finished; review/security/qa/ci are planned but not implemented yet.
-    assert wf.status == WorkflowStatus.PAUSED
-    assert "not implemented yet" in wf.execution.note
-    dev = next(s for s in wf.route_plan.stages if s.capability == "development")
-    assert dev.status == "completed"
+    # Development, then one clean verification round, then the final report.
+    assert wf.status == WorkflowStatus.COMPLETED
+    assert {s.capability: s.status for s in wf.route_plan.stages} == {
+        "development": "completed",
+        "code_review": "completed",
+        "security": "completed",
+        "qa": "completed",
+        "ci": "completed",
+    }
+    assert wf.report.outcome == "passed" and wf.report.repair_rounds == 0
+    assert wf.execution.target_commit == wf.execution.integration_commit
 
     # The docs task depends on backend + frontend and was built on top of their code.
     assert sorted(tasks["T4-docs"].result.merged_tasks) == ["T2-backend", "T3-frontend"]
@@ -96,7 +112,11 @@ async def test_full_development_flow(container, git_repo):
     branches = git(git_repo, "branch", "--list", f"forgeflow/{wf.workflow_id}/*")
     assert "integration" in branches and "T2-backend" in branches
 
-    # Every implement task has its own workspace record.
+    # Verification ran on the integration commit and its checkouts were cleaned up.
+    assert tasks["V1-ci"].result.ci.build.commit == integration.commit
+    assert not (container.settings.workspaces_root / wf.workflow_id / "V1-qa").exists()
+
+    # Every code-writing task has its own workspace record.
     workspaces = await container.store.list_workspaces(wf.workflow_id)
     assert {w.task_id.split(".")[-1] for w in workspaces} == {
         "T2-backend",

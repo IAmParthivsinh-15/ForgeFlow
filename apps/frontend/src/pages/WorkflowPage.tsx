@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { ActivityLog, AgentRuns } from "../components/ActivityLog";
 import { ClarificationDialog } from "../components/ClarificationDialog";
 import { DevelopmentView } from "../components/DevelopmentView";
+import { A2APanel, DecisionPanel, ReportView } from "../components/ReportView";
 import { RoutePlanView } from "../components/RoutePlanView";
 import { Card, SpecificationView } from "../components/SpecificationView";
 import { StatusBadge } from "../components/StatusBadge";
@@ -54,7 +55,9 @@ export function WorkflowPage() {
         </div>
       </div>
 
-      {workflow.error && (
+      {workflow.execution?.awaiting_decision && <DecisionPanel workflow={workflow} />}
+
+      {workflow.error && !workflow.execution?.awaiting_decision && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/50 dark:text-rose-300">
           {workflow.error}
         </div>
@@ -70,6 +73,7 @@ export function WorkflowPage() {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="flex min-w-0 flex-col gap-4">
+          {workflow.report && <ReportView report={workflow.report} />}
           {workflow.route_plan && <RoutePlanView plan={workflow.route_plan} />}
           {(workflow.execution || tasks.length > 0) && (
             <DevelopmentView workflow={workflow} tasks={tasks} runs={agent_runs} />
@@ -95,6 +99,7 @@ export function WorkflowPage() {
         </div>
         <div className="flex min-w-0 flex-col gap-4">
           <ActivityLog events={events.data ?? []} />
+          <A2APanel workflowId={workflow.workflow_id} />
           <AgentRuns runs={agent_runs.filter((r) => !r.task_id)} />
         </div>
       </div>

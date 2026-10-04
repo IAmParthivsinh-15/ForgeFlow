@@ -74,5 +74,6 @@ def test_development_agents_have_the_right_tools():
         "search_code",
         "write_file",
     ]
-    for module in (developer, subagent, integrator):
+    assert developer.prompt().version == "1.1.0"  # adds A2A answering
+    for module in (subagent, integrator):
         assert module.prompt().version == "1.0.0"

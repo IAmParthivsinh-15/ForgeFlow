@@ -10,9 +10,11 @@ from __future__ import annotations
 from forgeflow.schemas.requirement import RequiredCapabilities
 from forgeflow.schemas.workflow import Capability, RoutePlan, RouteStage
 
-# Capabilities whose agents are implemented in this milestone. Planned stages for
-# others are recorded so the plan is visible, but not executed yet.
-IMPLEMENTED_CAPABILITIES: frozenset[Capability] = frozenset()
+# Capabilities whose agents are implemented. Stages for anything else would be
+# recorded in the plan but not executed.
+IMPLEMENTED_CAPABILITIES: frozenset[Capability] = frozenset(
+    {"development", "code_review", "security", "qa", "ci"}
+)
 
 _ORDER: tuple[Capability, ...] = ("development", "code_review", "security", "qa", "ci")
 _AGENT: dict[Capability, str] = {

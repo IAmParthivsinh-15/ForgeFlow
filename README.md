@@ -2,8 +2,9 @@
 
 Autonomous software-engineering control plane. Full specification: [Implementation_v1.md](Implementation_v1.md).
 
-**Current status: Phase 0 + Milestone 1 (requirement-first orchestration) + Milestone 2
-(development: task graph, parallel worktrees, integration).**
+**Current status: Phase 0 + Milestones 1–3: requirement-first orchestration, development
+with parallel worktrees, and verification (code review, OWASP security, QA, Jenkins CI) with a
+bounded repair loop, A2A, and a final report.**
 
 ```text
 User request
@@ -19,12 +20,28 @@ User request
              parallel, overlapping scopes are serialized; ForgeFlow commits; repo checks run
       Tn+1   Integration: merge every branch into forgeflow/<workflow>/integration,
              Integrator agent resolves conflicts, post-merge checks
-  → Workflow = PAUSED ("development complete; next stages not implemented yet")
+  → Verification round on the integration commit (only the routed stages)
+      Code Review ─┐                  Change Analyzer adds Security when auth / infra /
+      Security ────┴→ QA → CI (Jenkins)  dependency / database files changed
+  → Blockers? → repair task (Developer) → next round re-runs the failed stages, everything
+                after them, and review. At most MAX_REPAIR_ATTEMPTS, then a human decides
+                (accept the risks, or allow one more repair).
+  → Final report + ready-to-paste PR title/description → Workflow = COMPLETED
 ```
 
-Code Review, Security, QA and CI stages are recorded in the plan but not executed yet; they
-arrive in Milestone 3 (spec §198). ForgeFlow never pushes and never changes your own branches:
-all work lands on `forgeflow/<workflow_id>/*` branches in the source repository.
+Requests that need no code (e.g. "Review PR #142", "Check this app against OWASP Top 10",
+"Run the CI pipeline") skip development and verify the repository's current HEAD; their
+findings are reported, not repaired. ForgeFlow never pushes and never changes your own
+branches: all work lands on `forgeflow/<workflow_id>/*` branches in the source repository.
+
+**What blocks (decided by ForgeFlow, not by the agents):**
+
+| Stage | Blocks when |
+|---|---|
+| Code review | decision `blocked`, or `changes_requested` with a high/critical finding |
+| Security | a high/critical finding (agent or scanner) in a changed file — any file for a pure audit |
+| QA | any acceptance criterion FAILs, or the repository's test command fails. A PASS without an executed passing test is downgraded to UNCERTAIN |
+| CI | the Jenkins build result is not SUCCESS |
 
 ---
 
@@ -34,10 +51,14 @@ Requirements: Docker Desktop.
 
 ```bash
 cp .env.example .env            # optional for fake mode
-FAKE_LLM=true docker compose up --build -d
+FAKE_LLM=true docker compose --profile ci up --build -d
 ```
 
-PowerShell: `$env:FAKE_LLM="true"; docker compose up --build -d`
+PowerShell: `$env:FAKE_LLM="true"; docker compose --profile ci up --build -d`
+
+The `ci` profile starts a local Jenkins (http://localhost:8081, user `forgeflow`, password
+`forgeflow-local`; change both via `JENKINS_USER` / `JENKINS_PASSWORD`). Without the profile
+everything works except the CI stage, which retries and then pauses with "Jenkins unavailable".
 
 | What | Where |
 |---|---|
@@ -46,7 +67,9 @@ PowerShell: `$env:FAKE_LLM="true"; docker compose up --build -d`
 | Health (Mongo/Redis/Kafka) | http://localhost:8000/health |
 
 `FAKE_LLM=true` uses deterministic fake agents, so you can test the whole flow (including the
-clarification dialog, parallel worktrees and integration) without an LLM. In fake mode the
+clarification dialog, parallel worktrees, integration, verification and A2A) without an LLM.
+Add `demo-repair` to a request to make the fake reviewer request changes once, which shows
+the repair loop. Scanners, the repository's tests and Jenkins builds are always real. In fake mode the
 subagents write small placeholder files under `forgeflow-demo/` in the target repository's
 branches. Stop with `docker compose down`.
 
@@ -93,8 +116,17 @@ least one commit (a plain folder is analysed but not developed).
     lint: npm run lint --silent
   ```
 
-  The worker image includes Python 3.12, Node.js and npm. Repositories needing other toolchains
-  report "executable not found" for their checks.
+  The worker and Jenkins images include Python 3.12, Node.js and npm. Repositories needing other
+  toolchains report "executable not found" for their checks.
+- **CI:** the CI stage renders a Jenkinsfile from these same commands (Checkout → Setup → Lint →
+  Typecheck → Test → Build), creates or updates the job `forgeflow-<repo>`, triggers it for the
+  exact commit under verification, and collects stages and the log. The LLM never writes
+  pipeline code; it only diagnoses failures.
+- **Security scanners** (worker image): Gitleaks (secrets), Bandit (Python), Semgrep with the
+  OWASP-tagged rules in [config/semgrep/](config/semgrep/) (offline, metrics off), and
+  `npm audit` / `pip-audit` (need network; reported as errors when offline). A scanner that is
+  missing reports `unavailable`, and the affected OWASP categories become `uncertain`, never
+  `pass`.
 
 ## 4. Local development (without containers for the app)
 
@@ -160,6 +192,13 @@ stopped heart-beating (spec §48). Scale agents with `docker compose up -d --sca
 | Task executor (decompose / implement / integrate) | `src/forgeflow/platform/execution/executor.py` | §24, §47, §50–52 |
 | Worktree manager | `src/forgeflow/platform/worktrees/manager.py` | §21, §22, §184 |
 | Git, scoped writes, allowlisted commands | `src/forgeflow/tools/{git,filesystem,shell,testing}/` | §73–77 |
+| Change Analyzer (review routing) | `src/forgeflow/platform/verification/change_analyzer.py` | §53, §54, §189 |
+| Review / Security / QA / CI stages | `src/forgeflow/platform/execution/verification.py` | §11–14, §55, §190 |
+| Security scanners + Semgrep rules | `src/forgeflow/tools/security/scanners.py`, `config/semgrep/` | §14, §190 |
+| Jenkins provider + pipeline templates | `src/forgeflow/platform/ci/` | §56, §191 |
+| Repair loop, rounds, human decision | `src/forgeflow/platform/orchestration/execution.py` | §57 |
+| A2A channel | `src/forgeflow/platform/a2a/channel.py` | §186–188 |
+| Final report + PR text | `src/forgeflow/platform/orchestration/report.py` | §50, §58 |
 | Frontend | `apps/frontend/` | §63–65, §174 |
 
 ### Why the Python code is under `src/forgeflow/`
@@ -191,6 +230,11 @@ Nesting them under `forgeflow` keeps the spec's layout without those collisions.
   manually (`POST /api/v1/tasks/{id}/retry`) or the workflow cancelled.
 - **Agents don't commit.** Subagents edit files; ForgeFlow stages, commits and merges with git
   commands it builds itself from validated names.
+- **A2A is bounded.** Review, Security and QA agents may ask the Developer up to
+  `A2A_MAX_PER_RUN` questions (each with `A2A_TIMEOUT_SECONDS`). Answers are information only;
+  every exchange is recorded (sender, receiver, task, request, response, status).
+- **Reports are evidence, not prose.** The final report and PR description are assembled from
+  the recorded task results, never written by an LLM.
 
 ## API
 
@@ -207,9 +251,14 @@ Nesting them under `forgeflow` keeps the spec's layout without those collisions.
 | POST | `/api/v1/tasks/{task_id}/retry`, `/api/v1/tasks/{task_id}/cancel` |
 | GET | `/api/v1/tasks/{task_id}/diff`, `/api/v1/workflows/{id}/diff` (base → integration) |
 | GET | `/api/v1/workspaces?workflow_id=…`, `/api/v1/workspaces/{id}` |
+| GET | `/api/v1/workflows/{id}/report` (final report incl. PR title/body) |
+| POST | `/api/v1/workflows/{id}/decision` — `{action: "accept" \| "repair"}` when the repair limit is reached |
+| GET | `/api/v1/workflows/{id}/a2a` (recorded agent-to-agent exchanges) |
 | GET | `/api/v1/repositories`, `/health`, `/health/live` |
 
-## Next milestone (spec §198)
+## Next phases (spec §198)
 
-3. Code Review + Security (OWASP) + QA (acceptance-criteria driven) + CI (Jenkins), the
-   CI failure → fix → retest loop, and A2A collaboration between those agents and the Developer.
+35–39: GitHub plugin (create the PR from the integration branch), plugin / connector / skill
+registries, MCP gateway. 40–44: Elasticsearch/RAG over past failures, Prometheus/Grafana/Langfuse,
+Kubernetes, Argo CD, and Playwright MCP for browser-based QA (browser-only acceptance criteria
+are reported UNCERTAIN until then).

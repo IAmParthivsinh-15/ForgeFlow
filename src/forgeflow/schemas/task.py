@@ -8,6 +8,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from forgeflow.schemas.verification import (
+    ChangeAnalysis,
+    CIReport,
+    QAReport,
+    ReviewReport,
+    SecurityReport,
+)
+
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
@@ -25,7 +33,11 @@ class TaskStatus(StrEnum):
     RETRYING = "RETRYING"
 
 
-TaskKind = Literal["decompose", "implement", "integrate"]
+TaskKind = Literal[
+    "decompose", "implement", "integrate", "repair", "review", "security", "qa", "ci"
+]
+VERIFICATION_KINDS: frozenset[str] = frozenset({"review", "security", "qa", "ci"})
+DEVELOPMENT_KINDS: frozenset[str] = frozenset({"decompose", "implement", "integrate", "repair"})
 
 
 class CheckRun(BaseModel):
@@ -52,6 +64,16 @@ class TaskResult(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
     merged_tasks: list[str] = Field(default_factory=list)
     conflicts_resolved: list[str] = Field(default_factory=list)
+    # Verification outcome, decided by ForgeFlow (not by the agent).
+    verdict: Literal["pass", "fail", "uncertain"] | None = None
+    blocking: bool = False
+    blocking_reasons: list[str] = Field(default_factory=list)
+    change_analysis: ChangeAnalysis | None = None
+    review: ReviewReport | None = None
+    security: SecurityReport | None = None
+    qa: QAReport | None = None
+    ci: CIReport | None = None
+    a2a_messages: int = 0
 
 
 class Task(BaseModel):
@@ -68,6 +90,8 @@ class Task(BaseModel):
     resource_scope: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list, description="AC ids")
     priority: int = 50
+    # Verification round this task belongs to (0 = development).
+    round: int = 0
     attempt: int = 0
     max_attempts: int = 2
     retryable: bool = False

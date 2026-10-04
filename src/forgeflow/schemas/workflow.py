@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from forgeflow.schemas.verification import FinalReport
+
 
 class WorkflowStatus(StrEnum):
     CREATED = "CREATED"
@@ -68,6 +70,15 @@ class ExecutionInfo(BaseModel):
     base_ref: str
     integration_branch: str | None = None
     integration_commit: str | None = None
+    # Commit currently being verified (integration commit, or base when nothing is developed).
+    target_commit: str | None = None
+    verification_round: int = 0
+    repair_attempts: int = 0
+    # Extra repair rounds granted by a human after the automatic limit was reached.
+    extra_repairs_allowed: int = 0
+    # Set when the workflow is PAUSED waiting for a human decision on open blockers.
+    awaiting_decision: bool = False
+    accepted_risks: list[str] = Field(default_factory=list)
     note: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
@@ -83,6 +94,7 @@ class Workflow(BaseModel):
     clarification_round: int = 0
     route_plan: RoutePlan | None = None
     execution: ExecutionInfo | None = None
+    report: FinalReport | None = None
     error: str | None = None
     # Optimistic-concurrency revision; maintained by the store.
     revision: int = 0

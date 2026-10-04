@@ -11,6 +11,8 @@ from forgeflow.core.config import Settings
 from forgeflow.platform.orchestration.fake_gateway import FakeAgentGateway
 from forgeflow.platform.state.memory import InMemoryWorkflowStore
 from forgeflow.schemas.task import TaskStatus
+from forgeflow.tools.security.scanners import ScannerSuite
+from tests.fakes import FakeCI
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -40,6 +42,8 @@ def git_repo(repos_root: Path) -> Path:
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "app.py").write_text("def handler():\n    return 'ok'\n")
     (repo / "README.md").write_text("# App\n")
+    # Allowlisted repository commands used by QA and CI (spec section 75).
+    (repo / "forgeflow.yaml").write_text("commands:\n  test: python -c \"print('tests ok')\"\n")
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.email", "dev@example.com")
     git(repo, "config", "user.name", "Dev")
@@ -68,8 +72,16 @@ def store() -> InMemoryWorkflowStore:
 
 
 @pytest.fixture
-def container(store, settings) -> Container:
-    return assemble(settings, store, FakeAgentGateway())
+def fake_ci() -> FakeCI:
+    return FakeCI()
+
+
+@pytest.fixture
+def container(store, settings, fake_ci) -> Container:
+    c = assemble(settings, store, FakeAgentGateway())
+    c.ci = fake_ci
+    c.scanners = ScannerSuite([])  # real scanners are exercised in test_scanners.py
+    return c
 
 
 @pytest.fixture

@@ -90,7 +90,36 @@ async def test_task_endpoints_and_diffs(client, container, git_repo):
     workspaces = (await client.get(f"/api/v1/workspaces?workflow_id={wf.workflow_id}")).json()
     assert len(workspaces) == 4
     detail = (await client.get(f"/api/v1/workflows/{wf.workflow_id}")).json()
-    assert len(detail["tasks"]) == 5
+    assert len(detail["tasks"]) == 8  # 5 development + review, qa, ci (no security needed)
 
     r = await client.post(f"/api/v1/tasks/{backend['task_id']}/retry")
     assert r.status_code == 422  # completed tasks cannot be retried
+
+
+async def test_report_decision_and_a2a_endpoints(client, container, git_repo, fake_ci, settings):
+    from tests.conftest import drive
+
+    settings.max_repair_attempts = 0
+    fake_ci.results = ["FAILURE", "SUCCESS"]
+    svc = container.service
+    wf = await svc.create_workflow("Add a status page", "app")
+    await svc.process_analysis(wf.workflow_id, 1)
+    [q] = await container.store.list_questions(wf.workflow_id)
+    await svc.answer_question(q.question_id, "A", None)
+    await svc.process_analysis(wf.workflow_id, 2)
+    await container.execution.start_execution(wf.workflow_id)
+    await drive(container, wf.workflow_id)
+
+    assert (await client.get(f"/api/v1/workflows/{wf.workflow_id}/report")).status_code == 404
+    detail = (await client.get(f"/api/v1/workflows/{wf.workflow_id}")).json()
+    assert detail["workflow"]["execution"]["awaiting_decision"] is True
+
+    bad = await client.post(f"/api/v1/workflows/{wf.workflow_id}/decision", json={"action": "x"})
+    assert bad.status_code == 422
+    r = await client.post(f"/api/v1/workflows/{wf.workflow_id}/decision", json={"action": "accept"})
+    assert r.status_code == 200 and r.json()["status"] == "COMPLETED"
+    report = (await client.get(f"/api/v1/workflows/{wf.workflow_id}/report")).json()
+    assert report["outcome"] == "passed_with_accepted_risks" and report["pr_body"]
+
+    messages = (await client.get(f"/api/v1/workflows/{wf.workflow_id}/a2a")).json()
+    assert messages and messages[0]["receiver"] == "developer"
