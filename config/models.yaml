@@ -1,0 +1,59 @@
+# ForgeFlow model routing (spec sections 38, 39, 141).
+#
+# - Providers are OpenAI-compatible endpoints. API keys are NEVER written here;
+#   `api_key_env` names the environment variable that holds the key.
+# - A provider whose key variable is unset is skipped, so the fallback chain
+#   only contains providers you have actually configured.
+# - Each profile is an ordered fallback chain: the first entry is tried first;
+#   the next is used only if the previous provider errors or returns invalid
+#   structured output.
+# - Model IDs are deployment configuration. Check each provider's catalogue and
+#   set the IDs you have access to via the *_MODEL environment variables.
+#
+# structured_output:
+#   json_schema  -> provider enforces the JSON schema (response_format)
+#   prompt       -> schema is given in the prompt; ForgeFlow validates the reply
+#                   with Pydantic and asks the model to repair invalid JSON
+
+providers:
+  nvidia:
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    structured_output: prompt
+  openai:
+    base_url_env: OPENAI_BASE_URL          # optional: point at a LiteLLM proxy
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    structured_output: json_schema
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    structured_output: prompt
+  ollama:
+    base_url_env: OLLAMA_BASE_URL
+    base_url: http://localhost:11434/v1
+    api_key_env: null                      # local; no key required
+    enabled_env: OLLAMA_ENABLED            # set OLLAMA_ENABLED=true to include it
+    structured_output: prompt
+
+profiles:
+  fast:
+    - { provider: nvidia, model_env: NVIDIA_MODEL_FAST }
+    - { provider: openai, model_env: OPENAI_MODEL_FAST }
+    - { provider: groq,   model_env: GROQ_MODEL_FAST }
+    - { provider: ollama, model_env: OLLAMA_MODEL }
+  planning:
+    - { provider: nvidia, model_env: NVIDIA_MODEL_PLANNING }
+    - { provider: openai, model_env: OPENAI_MODEL_PLANNING }
+    - { provider: groq,   model_env: GROQ_MODEL_PLANNING }
+    - { provider: ollama, model_env: OLLAMA_MODEL }
+  coding:
+    - { provider: nvidia, model_env: NVIDIA_MODEL_CODING }
+    - { provider: openai, model_env: OPENAI_MODEL_CODING }
+    - { provider: groq,   model_env: GROQ_MODEL_CODING }
+    - { provider: ollama, model_env: OLLAMA_MODEL }
+  review:
+    - { provider: nvidia, model_env: NVIDIA_MODEL_REVIEW }
+    - { provider: openai, model_env: OPENAI_MODEL_REVIEW }
+    - { provider: groq,   model_env: GROQ_MODEL_REVIEW }
+    - { provider: ollama, model_env: OLLAMA_MODEL }
