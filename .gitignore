@@ -30,3 +30,6 @@ workspaces/*
 Thumbs.db
 .idea/
 .vscode/
+
+# Specification is kept locally, outside the repository
+Implementation_v1.md

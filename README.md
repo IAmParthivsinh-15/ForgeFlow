@@ -1,6 +1,7 @@
 # ForgeFlow
 
-Autonomous software-engineering control plane. Full specification: [Implementation_v1.md](Implementation_v1.md).
+Autonomous software-engineering control plane, built from the ForgeFlow V1 specification
+(`Implementation_v1.md`, kept outside this repository). Section numbers (§) below refer to it.
 
 **Current status: Phase 0 + Milestones 1–3: requirement-first orchestration, development
 with parallel worktrees, and verification (code review, OWASP security, QA, Jenkins CI) with a
