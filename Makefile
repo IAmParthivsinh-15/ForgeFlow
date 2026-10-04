@@ -1,6 +1,6 @@
 # ForgeFlow task commands. On Windows without `make`, run the commands shown in README.md.
 
-.PHONY: install dev-api dev-worker dev-frontend test lint format typecheck compose-up compose-down logs
+.PHONY: install dev-api dev-worker dev-agent-worker dev-frontend test lint format typecheck compose-up compose-down logs
 
 install:
 	uv sync
@@ -11,6 +11,9 @@ dev-api:
 
 dev-worker:
 	uv run python -m forgeflow.apps.worker.main
+
+dev-agent-worker:
+	uv run python -m forgeflow.apps.agent_worker.main
 
 dev-frontend:
 	cd apps/frontend && npm run dev
@@ -35,4 +38,4 @@ compose-down:
 	docker compose down
 
 logs:
-	docker compose logs -f platform-api orchestrator-worker
+	docker compose logs -f platform-api orchestrator-worker agent-worker

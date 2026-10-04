@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from forgeflow.apps.container import Container
+from forgeflow.apps.container import Container, assemble
 from forgeflow.core.config import Settings
 from forgeflow.platform.orchestration.fake_gateway import FakeAgentGateway
-from forgeflow.platform.orchestration.repositories import RepositoryResolver
-from forgeflow.platform.orchestration.service import WorkflowService
 from forgeflow.platform.state.memory import InMemoryWorkflowStore
+from forgeflow.schemas.task import TaskStatus
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "core.autocrlf=false", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -23,13 +34,31 @@ def repos_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings(repos_root: Path) -> Settings:
+def git_repo(repos_root: Path) -> Path:
+    """A real git repository with one commit at repos/app."""
+    repo = repos_root / "app"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("def handler():\n    return 'ok'\n")
+    (repo / "README.md").write_text("# App\n")
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "dev@example.com")
+    git(repo, "config", "user.name", "Dev")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "initial")
+    return repo
+
+
+@pytest.fixture
+def settings(repos_root: Path, tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
         forgeflow_env="test",
         fake_llm=True,
         repos_root=repos_root,
+        workspaces_root=tmp_path / "workspaces",
         max_clarification_rounds=2,
+        task_retry_backoff_seconds=0,
+        heartbeat_interval_seconds=0.05,
     )
 
 
@@ -39,12 +68,26 @@ def store() -> InMemoryWorkflowStore:
 
 
 @pytest.fixture
-def service(store, settings) -> WorkflowService:
-    return WorkflowService(
-        store, FakeAgentGateway(), RepositoryResolver(settings.repos_root), settings
-    )
+def container(store, settings) -> Container:
+    return assemble(settings, store, FakeAgentGateway())
 
 
 @pytest.fixture
-def container(store, service, settings) -> Container:
-    return Container(settings, store, service, service.repositories)
+def service(container):
+    return container.service
+
+
+async def drive(container: Container, workflow_id: str, max_rounds: int = 30) -> None:
+    """Stand-in for Kafka + workers: tick, run every dispatched task concurrently, repeat."""
+    executor = container.executor("test-worker")
+    for _ in range(max_rounds):
+        await container.execution.tick(workflow_id)
+        dispatched = [
+            t
+            for t in await container.store.list_tasks(workflow_id)
+            if t.status == TaskStatus.DISPATCHED
+        ]
+        if not dispatched:
+            return
+        await asyncio.gather(*(executor.execute(t.task_id, t.attempt) for t in dispatched))
+    raise AssertionError("workflow did not settle")

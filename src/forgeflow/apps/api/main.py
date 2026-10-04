@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from forgeflow.apps.api.routes import questions, system, workflows
+from forgeflow.apps.api.routes import questions, system, tasks, workflows
 from forgeflow.apps.container import Container, build_container, load_environment
 from forgeflow.core.config import get_settings
 from forgeflow.core.errors import (
@@ -61,6 +61,7 @@ def create_app(container_factory: Callable[[], Awaitable[Container]] | None = No
     app.include_router(system.router)
     app.include_router(workflows.router)
     app.include_router(questions.router)
+    app.include_router(tasks.router)
     return app
 
 

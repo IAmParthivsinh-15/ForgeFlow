@@ -47,6 +47,27 @@ class Settings(BaseSettings):
     outbox_poll_interval_seconds: float = 0.5
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:8080"]
 
+    # --- Milestone 2: execution -------------------------------------------------------
+    # Git worktrees for code-writing tasks are created under this directory.
+    workspaces_root: Path = Path("./workspaces")
+    # Upper bound on tasks of one workflow running at the same time (spec section 113).
+    max_parallel_tasks: int = Field(default=3, ge=1)
+    # Tasks one agent-worker process executes concurrently.
+    agent_worker_concurrency: int = Field(default=3, ge=1)
+    max_subtasks: int = Field(default=6, ge=1, le=20)
+    task_max_attempts: int = Field(default=2, ge=1)
+    task_retry_backoff_seconds: float = Field(default=10, ge=0)
+    task_timeout_seconds: float = Field(default=1800, gt=0)
+    # A DISPATCHED task not claimed within this time is re-dispatched.
+    dispatch_timeout_seconds: float = Field(default=120, gt=0)
+    heartbeat_interval_seconds: float = Field(default=15, gt=0)
+    # A RUNNING task without a heartbeat for this long is treated as a lost worker.
+    heartbeat_stale_seconds: float = Field(default=120, gt=0)
+    reaper_interval_seconds: float = Field(default=15, gt=0)
+    check_timeout_seconds: float = Field(default=600, gt=0)
+    git_author_name: str = "ForgeFlow"
+    git_author_email: str = "forgeflow@localhost"
+
 
 @lru_cache
 def get_settings() -> Settings:

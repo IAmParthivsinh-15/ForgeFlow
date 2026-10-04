@@ -23,11 +23,30 @@ class EventType:
     WORKFLOW_FAILED = "workflow.failed"
     AGENT_RUN_COMPLETED = "agent.run.completed"
     AGENT_RUN_FAILED = "agent.run.failed"
+    WORKFLOW_EXECUTION_STARTED = "workflow.execution_started"
+    WORKFLOW_EXECUTION_FINISHED = "workflow.execution_finished"
+
+    # Task lifecycle (spec sections 2.4, 94). Every task transition emits one of these.
+    TASK_CREATED = "task.created"
+    TASK_READY = "task.ready"
+    TASK_DISPATCHED = "task.dispatched"
+    TASK_STARTED = "task.started"
+    TASK_PROGRESS = "task.progress"
+    TASK_COMPLETED = "task.completed"
+    TASK_FAILED = "task.failed"
+    TASK_BLOCKED = "task.blocked"
+    TASK_UNBLOCKED = "task.unblocked"
+    TASK_RETRYING = "task.retrying"
+    TASK_CANCELLED = "task.cancelled"
+    WORKSPACE_CREATED = "workspace.created"
+    CHECK_COMPLETED = "test.completed"
+    INTEGRATION_CONFLICT = "integration.conflict"
 
 
 class Topics:
     WORKFLOW = "forgeflow.workflow.events"
     AGENT = "forgeflow.agent.events"
+    TASK = "forgeflow.task.events"
 
 
 class Event(BaseModel):

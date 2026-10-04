@@ -50,7 +50,7 @@ class RouteStage(BaseModel):
     capability: Capability
     agent: str
     depends_on: list[str] = Field(default_factory=list)
-    status: Literal["planned", "skipped"] = "planned"
+    status: Literal["planned", "running", "completed", "failed", "skipped"] = "planned"
     implemented: bool = False
     reason: str
 
@@ -59,6 +59,18 @@ class RoutePlan(BaseModel):
     stages: list[RouteStage]
     skipped: list[Capability]
     rationale: str
+
+
+class ExecutionInfo(BaseModel):
+    """Git context of a workflow's code-writing execution."""
+
+    base_commit: str
+    base_ref: str
+    integration_branch: str | None = None
+    integration_commit: str | None = None
+    note: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
 
 
 class Workflow(BaseModel):
@@ -70,10 +82,10 @@ class Workflow(BaseModel):
     requirement_version: int = 0
     clarification_round: int = 0
     route_plan: RoutePlan | None = None
+    execution: ExecutionInfo | None = None
     error: str | None = None
-    # Optimistic-concurrency revision and per-workflow event sequence; maintained by the store.
+    # Optimistic-concurrency revision; maintained by the store.
     revision: int = 0
-    event_seq: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -91,6 +103,7 @@ class AgentRunRecord(BaseModel):
 
     run_id: str
     workflow_id: str
+    task_id: str | None = None
     agent_type: str
     prompt_version: str
     status: Literal["completed", "failed"]

@@ -47,7 +47,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
-ignore = ["S101"]
+# ASYNC240: quick pathlib metadata checks in async code are acceptable here.
+ignore = ["S101", "ASYNC240"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S"]

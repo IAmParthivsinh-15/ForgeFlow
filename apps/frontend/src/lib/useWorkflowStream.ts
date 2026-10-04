@@ -33,6 +33,21 @@ export function useWorkflowStream(workflowId: string) {
       "clarification.answered",
       "agent.run.completed",
       "agent.run.failed",
+      "workflow.execution_started",
+      "workflow.execution_finished",
+      "task.created",
+      "task.ready",
+      "task.dispatched",
+      "task.started",
+      "task.completed",
+      "task.failed",
+      "task.blocked",
+      "task.unblocked",
+      "task.retrying",
+      "task.cancelled",
+      "workspace.created",
+      "test.completed",
+      "integration.conflict",
     ];
     types.forEach((t) => source.addEventListener(t, onEvent as EventListener));
     source.onmessage = onEvent;

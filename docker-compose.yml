@@ -1,4 +1,4 @@
-# ForgeFlow local development stack - Phase 0 + Milestone 1.
+# ForgeFlow local development stack - Phase 0, Milestones 1 and 2.
 #
 #   docker compose up --build
 #
@@ -16,10 +16,13 @@ x-python-service: &python-service
     REDIS_URL: redis://redis:6379/0
     KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     REPOS_ROOT: /repos
+    WORKSPACES_ROOT: /workspaces
     # Interpolated from the shell or .env, so `FAKE_LLM=true docker compose up` works too.
     FAKE_LLM: ${FAKE_LLM:-false}
   volumes:
-    - ./repos:/repos:ro
+    # Read-write: ForgeFlow creates forgeflow/* branches and worktrees (never pushes).
+    - ./repos:/repos
+    - ./workspaces:/workspaces
   depends_on:
     mongodb: { condition: service_healthy }
     redis: { condition: service_healthy }
@@ -91,6 +94,11 @@ services:
   orchestrator-worker:
     <<: *python-service
     command: ["python", "-m", "forgeflow.apps.worker.main"]
+
+  # Executes dispatched tasks. Scale with: docker compose up -d --scale agent-worker=3
+  agent-worker:
+    <<: *python-service
+    command: ["python", "-m", "forgeflow.apps.agent_worker.main"]
 
   frontend:
     build:

@@ -19,9 +19,11 @@ apps/frontend/node_modules/
 apps/frontend/dist/
 *.tsbuildinfo
 
-# Repositories mounted for analysis (keep the folder and its README)
+# Repositories mounted for analysis and task worktrees (keep the folders' READMEs)
 repos/*
 !repos/README.md
+workspaces/*
+!workspaces/README.md
 
 # OS / editors
 .DS_Store

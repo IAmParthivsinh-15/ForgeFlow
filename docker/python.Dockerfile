@@ -1,5 +1,9 @@
-# Image for platform-api and orchestrator-worker.
+# Image for platform-api, orchestrator-worker and agent-worker.
 FROM python:3.12-slim
+
+# git: worktrees, commits, merges. nodejs/npm: allowlisted checks for JavaScript repos.
+# Repositories are bind-mounted and owned by another uid, so git must trust them explicitly.
+RUN apt-get update     && apt-get install -y --no-install-recommends git nodejs npm ca-certificates     && rm -rf /var/lib/apt/lists/*     && git config --system --add safe.directory '*'
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 

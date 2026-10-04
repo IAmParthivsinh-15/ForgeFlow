@@ -45,3 +45,34 @@ def test_analysis_input_includes_answers_and_finalize_instruction():
     assert "Add OAuth" in text
     assert "No repository is attached" in text
     assert "You MUST finalize now" in text
+
+
+def test_development_agents_have_the_right_tools():
+    from forgeflow.agents.developer import agent as developer
+    from forgeflow.agents.developer_subagent import agent as subagent
+    from forgeflow.agents.integrator import agent as integrator
+
+    names = lambda a: sorted(t.name for t in a.tools)  # noqa: E731
+    assert names(developer.create_developer_agent(model())) == [
+        "list_files",
+        "read_file",
+        "search_code",
+    ]
+    assert names(subagent.create_developer_subagent(model())) == [
+        "delete_file",
+        "list_files",
+        "read_file",
+        "replace_in_file",
+        "run_check",
+        "search_code",
+        "write_file",
+    ]
+    assert "run_check" not in names(subagent.create_developer_subagent(model(), with_checks=False))
+    assert names(integrator.create_integrator_agent(model())) == [
+        "list_files",
+        "read_file",
+        "search_code",
+        "write_file",
+    ]
+    for module in (developer, subagent, integrator):
+        assert module.prompt().version == "1.0.0"

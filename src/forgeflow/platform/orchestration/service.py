@@ -18,6 +18,7 @@ from forgeflow.core.config import Settings
 from forgeflow.core.errors import AllProvidersFailed, ConcurrencyConflict, ValidationFailed
 from forgeflow.core.ids import new_id, utcnow
 from forgeflow.core.logging import bind_context, log_event
+from forgeflow.platform.orchestration.execution import TaskChanges
 from forgeflow.platform.orchestration.gateway import AgentGateway, AgentOutcome, AnalysisRequest
 from forgeflow.platform.orchestration.repositories import RepositoryResolver
 from forgeflow.platform.orchestration.routing import plan_route
@@ -37,6 +38,7 @@ from forgeflow.schemas.requirement import (
     RequirementSpecification,
     SpecStatus,
 )
+from forgeflow.schemas.task import TaskStatus
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow, WorkflowStatus
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,10 @@ class WorkflowService:
         ]
         self._transition(wf, WorkflowStatus.PLANNING, events)
         events.append(self._event(wf, EventType.ANALYSIS_REQUESTED, requirement_version=1))
-        stored = await self.store.commit(Commit(workflow=wf, expected_revision=None, events=events))
+        stored = (
+            await self.store.commit(Commit(workflow=wf, create_workflow=True, events=events))
+        ).workflow
+        assert stored is not None
         log_event(logger, "workflow created", workflow_id=wf.workflow_id)
         return stored
 
@@ -329,9 +334,12 @@ class WorkflowService:
             )
         else:
             wf.updated_at = utcnow()
-        stored = await self.store.commit(
-            Commit(workflow=wf, expected_revision=revision, questions=[question], events=events)
-        )
+        stored = (
+            await self.store.commit(
+                Commit(workflow=wf, expected_revision=revision, questions=[question], events=events)
+            )
+        ).workflow
+        assert stored is not None
         return question, stored
 
     # ------------------------------------------------------------------ cancel
@@ -343,9 +351,29 @@ class WorkflowService:
         revision = wf.revision
         events: list[Event] = []
         self._transition(wf, WorkflowStatus.CANCELLED, events)
-        return await self.store.commit(
-            Commit(workflow=wf, expected_revision=revision, events=events)
-        )
+        # Running tasks notice the cancellation through their heartbeat and stop.
+        changes = TaskChanges()
+        for task in await self.store.list_tasks(workflow_id):
+            if task.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+                changes.move(
+                    task,
+                    TaskStatus.CANCELLED,
+                    EventType.TASK_CANCELLED,
+                    utcnow(),
+                    reason="workflow cancelled",
+                )
+        stored = (
+            await self.store.commit(
+                Commit(
+                    workflow=wf,
+                    expected_revision=revision,
+                    tasks=changes.task_writes(),
+                    events=events + changes.events,
+                )
+            )
+        ).workflow
+        assert stored is not None
+        return stored
 
     # ----------------------------------------------------------------- helpers
 
@@ -380,7 +408,7 @@ class WorkflowService:
 
     async def _commit_or_drop(self, change: Commit) -> Workflow | None:
         try:
-            return await self.store.commit(change)
+            return (await self.store.commit(change)).workflow
         except ConcurrencyConflict:
             # Another actor (e.g. a cancel) changed the workflow while the agents ran.
             log_event(

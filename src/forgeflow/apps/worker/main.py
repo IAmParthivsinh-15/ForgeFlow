@@ -1,11 +1,15 @@
 """Orchestrator worker.
 
 - Relays committed outbox events to Kafka.
-- Consumes `forgeflow.workflow.events` and runs requirement analysis when
-  `requirement.analysis_requested` arrives.
+- Consumes workflow events: runs requirement analysis; starts execution once a
+  workflow is routed to development.
+- Consumes task events: advances the task graph (scheduler tick) whenever a task
+  changes state.
+- Reaper: re-dispatches lost dispatches, fails tasks whose worker stopped
+  heart-beating, and wakes up due retries.
 
 Delivery is at-least-once: offsets are committed after handling; duplicates are
-absorbed by Redis de-duplication plus the service's own staleness check.
+absorbed by Redis de-duplication plus idempotent state checks.
 
 Run: python -m forgeflow.apps.worker.main
 """
@@ -28,9 +32,23 @@ from forgeflow.schemas.events import Event, EventType, Topics
 logger = logging.getLogger("forgeflow.worker")
 CONSUMER_GROUP = "orchestrator-worker"
 
+# Task events after which the scheduler must re-evaluate the graph.
+TICK_ON = frozenset(
+    {
+        EventType.TASK_CREATED,
+        EventType.TASK_COMPLETED,
+        EventType.TASK_FAILED,
+        EventType.TASK_CANCELLED,
+        EventType.TASK_RETRYING,
+    }
+)
+
 
 async def handle_event(container: Container, coordinator: Coordinator, event: Event) -> None:
-    if event.event_type != EventType.ANALYSIS_REQUESTED:
+    relevant = event.event_type in (EventType.ANALYSIS_REQUESTED, EventType.WORKFLOW_ROUTED) or (
+        event.event_type in TICK_ON
+    )
+    if not relevant:
         return
     if await coordinator.already_processed(CONSUMER_GROUP, event.event_id):
         log_event(logger, "duplicate event skipped", event_id=event.event_id)
@@ -38,9 +56,14 @@ async def handle_event(container: Container, coordinator: Coordinator, event: Ev
     bind_context(workflow_id=event.workflow_id)
     try:
         async with coordinator.workflow_lock(event.workflow_id):
-            await container.service.process_analysis(
-                event.workflow_id, int(event.payload["requirement_version"])
-            )
+            if event.event_type == EventType.ANALYSIS_REQUESTED:
+                await container.service.process_analysis(
+                    event.workflow_id, int(event.payload["requirement_version"])
+                )
+            elif event.event_type == EventType.WORKFLOW_ROUTED:
+                await container.execution.start_execution(event.workflow_id)
+            else:
+                await container.execution.tick(event.workflow_id)
         await coordinator.mark_processed(CONSUMER_GROUP, event.event_id)
     finally:
         clear_context()
@@ -51,6 +74,7 @@ async def consume(container: Container, stop: asyncio.Event) -> None:
     coordinator = Coordinator(container.redis)
     consumer = AIOKafkaConsumer(
         Topics.WORKFLOW,
+        Topics.TASK,
         bootstrap_servers=container.settings.kafka_bootstrap_servers,
         group_id=CONSUMER_GROUP,
         enable_auto_commit=False,
@@ -67,13 +91,39 @@ async def consume(container: Container, stop: asyncio.Event) -> None:
                     try:
                         await handle_event(container, coordinator, deserialize(message.value))
                     except Exception:
-                        # The service records failures on the workflow itself; a crash here
+                        # Failures are recorded on the workflow/task itself; a crash here
                         # is unexpected and must not stall the partition.
                         logger.exception("event handling failed")
             if batches:
                 await consumer.commit()
     finally:
         await consumer.stop()
+
+
+async def reap(container: Container, stop: asyncio.Event) -> None:
+    assert container.redis is not None
+    coordinator = Coordinator(container.redis)
+    interval = container.settings.reaper_interval_seconds
+    while not stop.is_set():
+        try:
+            for workflow_id in await container.execution.reap():
+                async with coordinator.workflow_lock(workflow_id):
+                    await container.execution.tick(workflow_id)
+        except Exception:
+            logger.exception("reaper iteration failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
+
+
+def install_signal_handlers(stop: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows event loop
+            signal.signal(sig, lambda *_: stop.set())
 
 
 async def main() -> None:
@@ -86,18 +136,11 @@ async def main() -> None:
         container.store, settings.kafka_bootstrap_servers, settings.outbox_poll_interval_seconds
     )
     await relay.start()
-
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:  # Windows event loop
-            signal.signal(sig, lambda *_: stop.set())
-
+    install_signal_handlers(stop)
     log_event(logger, "worker started", fake_llm=settings.fake_llm)
     try:
-        await asyncio.gather(relay.run(stop), consume(container, stop))
+        await asyncio.gather(relay.run(stop), consume(container, stop), reap(container, stop))
     finally:
         await relay.stop()
         await container.close()

@@ -3,13 +3,23 @@
 Behaviour:
 - intake: keyword-based intent classification;
 - analysis: feature/bugfix requests get one clarification question in the first
-  round; everything else (and every later round) is finalized immediately.
+  round; everything else (and every later round) is finalized immediately;
+- development: a three-subtask plan (backend + frontend in parallel, then docs that
+  depends on both) under `forgeflow-demo/`;
+- implementation: writes one small, real file per scope pattern;
+- conflict resolution: keeps both sides of every conflict region.
 """
 
 from __future__ import annotations
 
 from forgeflow.agents.context import AgentRuntimeContext
-from forgeflow.platform.orchestration.gateway import AgentOutcome, AnalysisRequest
+from forgeflow.platform.orchestration.gateway import (
+    AgentOutcome,
+    AnalysisRequest,
+    ConflictRequest,
+    DevelopmentRequest,
+    ImplementationRequest,
+)
 from forgeflow.schemas.requirement import (
     AnalyzerAcceptanceCriterion,
     AnalyzerOption,
@@ -17,7 +27,14 @@ from forgeflow.schemas.requirement import (
     AnalyzerResult,
     RequiredCapabilities,
 )
+from forgeflow.schemas.task import (
+    DevelopmentPlan,
+    ImplementationReport,
+    ResolutionReport,
+    SubtaskSpec,
+)
 from forgeflow.schemas.workflow import IntakeAssessment, Intent, ProviderAttempt
+from forgeflow.tools.filesystem.globs import literal_prefix
 
 FAKE_PROMPT_VERSION = "fake-1"
 _FAKE_ATTEMPT = ProviderAttempt(
@@ -128,3 +145,71 @@ class FakeAgentGateway:
             else [],
         )
         return AgentOutcome(result, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def plan_development(
+        self, ctx: AgentRuntimeContext, request: DevelopmentRequest
+    ) -> AgentOutcome[DevelopmentPlan]:
+        all_ac = [ac.id for ac in request.specification.acceptance_criteria]
+        subtasks = [
+            SubtaskSpec(
+                key="backend",
+                title="Backend changes",
+                instructions="Implement the server-side part of the requirement.",
+                file_scope=["forgeflow-demo/backend/**"],
+                acceptance_criteria=all_ac,
+            ),
+            SubtaskSpec(
+                key="frontend",
+                title="Frontend changes",
+                instructions="Implement the user-facing part of the requirement.",
+                file_scope=["forgeflow-demo/frontend/**"],
+                acceptance_criteria=all_ac,
+            ),
+            SubtaskSpec(
+                key="docs",
+                title="Document the change",
+                instructions="Describe the new behaviour.",
+                file_scope=["forgeflow-demo/CHANGES.md"],
+                depends_on=["backend", "frontend"],
+            ),
+        ][: request.max_subtasks]
+        for sub in subtasks:  # trimmed plans must not reference removed keys
+            sub.depends_on = [d for d in sub.depends_on if d in {s.key for s in subtasks}]
+        plan = DevelopmentPlan(summary=request.specification.summary, subtasks=subtasks)
+        return AgentOutcome(plan, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def implement_subtask(
+        self, ctx: AgentRuntimeContext, request: ImplementationRequest
+    ) -> AgentOutcome[ImplementationReport]:
+        workspace = ctx.workspace()
+        task = request.task
+        written = []
+        for pattern in task.file_scope:
+            prefix = literal_prefix(pattern)
+            path = f"{prefix}{task.key}.md" if prefix.endswith("/") or not prefix else prefix
+            body = f"# {task.title}\n\n{request.specification.summary}\n"
+            if path == prefix and workspace.resolve(path).is_file():
+                body = workspace.resolve(path).read_text(encoding="utf-8") + body
+            workspace.write_file(path, body)
+            written.append(path)
+        if ctx.checks is not None and "test" in request.available_checks:
+            await ctx.checks.run("test")
+        report = ImplementationReport(summary=f"{task.title}: wrote {', '.join(written)}")
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def resolve_conflicts(
+        self, ctx: AgentRuntimeContext, request: ConflictRequest
+    ) -> AgentOutcome[ResolutionReport]:
+        workspace = ctx.workspace()
+        for path in request.conflicted_files:
+            text = workspace.resolve(path).read_text(encoding="utf-8")
+            kept = [
+                line
+                for line in text.splitlines(keepends=True)
+                if not line.startswith(("<<<<<<<", "=======", ">>>>>>>"))
+            ]
+            workspace.write_file(path, "".join(kept))
+        report = ResolutionReport(
+            summary="Kept both sides of every conflict.", resolved_files=request.conflicted_files
+        )
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])

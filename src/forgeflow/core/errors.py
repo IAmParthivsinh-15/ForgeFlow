@@ -37,3 +37,15 @@ class ConcurrencyConflict(ForgeFlowError):
     """An optimistic-concurrency check failed; the caller should reload and retry."""
 
     retryable = True
+
+
+class GitError(ForgeFlowError):
+    """A git command failed. Not retryable: the repository state needs attention."""
+
+
+class InvalidTaskGraph(ForgeFlowError):
+    """The proposed task graph is malformed (cycle, unknown dependency, ...)."""
+
+
+class MergeConflictUnresolved(ForgeFlowError):
+    """Integration could not resolve a merge conflict."""

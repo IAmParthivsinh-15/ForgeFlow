@@ -21,6 +21,36 @@ function describe(event: WorkflowEvent): string {
       return `${p.agent_type} ${event.event_type.endsWith("failed") ? "failed" : "finished"} · ${(p.providers as string[]).join(", ")} · ${p.tool_calls} tool call(s)`;
     case "workflow.failed":
       return `Failed: ${p.error}`;
+    case "workflow.execution_started":
+      return `Development started from ${p.base_ref} @ ${String(p.base_commit).slice(0, 10)}`;
+    case "workflow.execution_finished":
+      return p.outcome === "not_started" ? `Development not started: ${p.reason}` : `Development finished → ${p.integration_branch}`;
+    case "task.created":
+      return `${p.key} created (${p.kind})`;
+    case "task.dispatched":
+      return `${p.key} dispatched${p.redispatch ? " again" : ""} (attempt ${p.attempt})`;
+    case "task.started":
+      return `${p.key} started`;
+    case "task.completed":
+      return `${p.key} completed${p.commit ? ` · ${String(p.commit).slice(0, 8)}` : ""}`;
+    case "task.failed":
+      return `${p.key} failed: ${p.error}`;
+    case "task.blocked":
+      return `${p.key} blocked`;
+    case "task.retrying":
+      return `${p.key} will be retried`;
+    case "task.cancelled":
+      return `${p.key} cancelled`;
+    case "test.completed":
+      return `${p.kind} ${p.passed ? "passed" : "failed"}: ${p.command}`;
+    case "integration.conflict":
+      return `Merge conflict integrating ${p.incoming}: ${(p.files as string[]).join(", ")}`;
+    case "workspace.created":
+      return `${p.key} worktree ready on ${p.branch}`;
+    case "task.ready":
+      return `${p.key} ready`;
+    case "task.unblocked":
+      return `${p.key} unblocked`;
     default:
       return event.event_type;
   }

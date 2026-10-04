@@ -7,4 +7,5 @@
 apps/frontend/node_modules
 apps/frontend/dist
 repos
+workspaces
 .env

@@ -30,7 +30,7 @@ export interface RouteStage {
   capability: string;
   agent: string;
   depends_on: string[];
-  status: "planned" | "skipped";
+  status: "planned" | "running" | "completed" | "failed" | "skipped";
   implemented: boolean;
   reason: string;
 }
@@ -39,6 +39,71 @@ export interface RoutePlan {
   stages: RouteStage[];
   skipped: string[];
   rationale: string;
+}
+
+export interface ExecutionInfo {
+  base_commit: string;
+  base_ref: string;
+  integration_branch: string | null;
+  integration_commit: string | null;
+  note: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export type TaskStatus =
+  | "PENDING"
+  | "READY"
+  | "DISPATCHED"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "BLOCKED"
+  | "CANCELLED"
+  | "RETRYING";
+
+export interface CheckRun {
+  kind: string;
+  command: string;
+  exit_code: number | null;
+  passed: boolean;
+  duration_ms: number;
+  output: string;
+  timed_out: boolean;
+}
+
+export interface TaskResult {
+  summary: string;
+  files_changed: string[];
+  commit: string | null;
+  branch: string | null;
+  checks: CheckRun[];
+  risks: string[];
+  next_actions: string[];
+  merged_tasks: string[];
+  conflicts_resolved: string[];
+}
+
+export interface Task {
+  task_id: string;
+  key: string;
+  title: string;
+  kind: "decompose" | "implement" | "integrate";
+  agent_type: string;
+  instructions: string;
+  status: TaskStatus;
+  dependencies: string[];
+  file_scope: string[];
+  acceptance_criteria: string[];
+  attempt: number;
+  max_attempts: number;
+  retryable: boolean;
+  wait_reason: string | null;
+  workspace_id: string | null;
+  result: TaskResult | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 export interface Workflow {
@@ -50,6 +115,7 @@ export interface Workflow {
   requirement_version: number;
   clarification_round: number;
   route_plan: RoutePlan | null;
+  execution: ExecutionInfo | null;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -110,6 +176,7 @@ export interface ProviderAttempt {
 
 export interface AgentRun {
   run_id: string;
+  task_id: string | null;
   agent_type: string;
   prompt_version: string;
   status: "completed" | "failed";
@@ -125,6 +192,7 @@ export interface WorkflowDetail {
   specification: Specification | null;
   questions: Question[];
   agent_runs: AgentRun[];
+  tasks: Task[];
 }
 
 export interface WorkflowEvent {
@@ -162,6 +230,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function text(path: string): Promise<string> {
+  const response = await fetch(path);
+  if (!response.ok) throw new ApiError(response.status, response.statusText);
+  return response.text();
+}
+
 export const api = {
   listWorkflows: () => request<Workflow[]>("/api/v1/workflows"),
   getWorkflow: (id: string) => request<WorkflowDetail>(`/api/v1/workflows/${id}`),
@@ -171,6 +245,12 @@ export const api = {
     request<Workflow>("/api/v1/workflows", { method: "POST", body: JSON.stringify(body) }),
   cancelWorkflow: (id: string) =>
     request<Workflow>(`/api/v1/workflows/${id}/cancel`, { method: "POST" }),
+  taskDiff: (taskId: string) => text(`/api/v1/tasks/${encodeURIComponent(taskId)}/diff`),
+  workflowDiff: (id: string) => text(`/api/v1/workflows/${id}/diff`),
+  retryTask: (taskId: string) =>
+    request<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" }),
+  cancelTask: (taskId: string) =>
+    request<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" }),
   answerQuestion: (questionId: string, body: { selected_option: string; custom_text?: string }) =>
     request<{ question: Question; workflow: Workflow }>(`/api/v1/questions/${questionId}/answer`, {
       method: "POST",

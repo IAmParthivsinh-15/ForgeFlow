@@ -15,20 +15,22 @@ class Coordinator:
         self.redis = redis
 
     @asynccontextmanager
-    async def workflow_lock(self, workflow_id: str, ttl: float = 1800) -> AsyncIterator[None]:
+    async def lock(self, name: str, ttl: float = 1800) -> AsyncIterator[None]:
         lock = self.redis.lock(
-            f"lock:workflow:{workflow_id}",
+            f"lock:{name}",
             timeout=ttl,
             blocking_timeout=ttl,
             raise_on_release_error=False,
         )
-        acquired = await lock.acquire()
-        if not acquired:
-            raise TimeoutError(f"could not acquire lock for workflow {workflow_id}")
+        if not await lock.acquire():
+            raise TimeoutError(f"could not acquire lock {name}")
         try:
             yield
         finally:
             await lock.release()
+
+    def workflow_lock(self, workflow_id: str, ttl: float = 1800):
+        return self.lock(f"workflow:{workflow_id}", ttl)
 
     async def already_processed(self, consumer: str, event_id: str) -> bool:
         return bool(await self.redis.exists(f"dedup:{consumer}:{event_id}"))

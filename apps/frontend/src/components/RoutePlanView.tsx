@@ -9,6 +9,14 @@ const AGENT_LABEL: Record<string, string> = {
   ci: "CI",
 };
 
+function stageLabel(stage: RouteStage): string {
+  if (stage.status === "running") return "running";
+  if (stage.status === "completed") return "completed";
+  if (stage.status === "failed") return `blocked · ${stage.reason}`;
+  if (stage.capability === "development") return "planned";
+  return "planned · agent not yet implemented";
+}
+
 /** Groups stages into dependency layers so parallel stages render side by side. */
 function layers(stages: RouteStage[]): RouteStage[][] {
   const level = new Map<string, number>();
@@ -38,9 +46,7 @@ export function RoutePlanView({ plan }: { plan: RoutePlan }) {
                     className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
                   >
                     <div className="text-sm font-medium">{AGENT_LABEL[stage.agent] ?? stage.agent}</div>
-                    <div className="text-xs text-slate-500">
-                      {stage.implemented ? "ready" : "planned · agent not yet implemented"}
-                    </div>
+                    <div className="text-xs text-slate-500">{stageLabel(stage)}</div>
                   </div>
                 ))}
               </div>

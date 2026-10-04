@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 
 import { ActivityLog, AgentRuns } from "../components/ActivityLog";
 import { ClarificationDialog } from "../components/ClarificationDialog";
+import { DevelopmentView } from "../components/DevelopmentView";
 import { RoutePlanView } from "../components/RoutePlanView";
 import { Card, SpecificationView } from "../components/SpecificationView";
 import { StatusBadge } from "../components/StatusBadge";
@@ -20,7 +21,7 @@ export function WorkflowPage() {
   if (detail.isPending) return <p className="text-sm text-slate-500">Loading…</p>;
   if (detail.isError) return <p className="text-sm text-rose-600">{(detail.error as Error).message}</p>;
 
-  const { workflow, specification, questions, agent_runs } = detail.data;
+  const { workflow, specification, questions, agent_runs, tasks } = detail.data;
   const answered = questions.filter((q) => q.status === "answered");
 
   return (
@@ -70,6 +71,9 @@ export function WorkflowPage() {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="flex min-w-0 flex-col gap-4">
           {workflow.route_plan && <RoutePlanView plan={workflow.route_plan} />}
+          {(workflow.execution || tasks.length > 0) && (
+            <DevelopmentView workflow={workflow} tasks={tasks} runs={agent_runs} />
+          )}
           {specification && <SpecificationView spec={specification} />}
           {answered.length > 0 && (
             <Card title="Clarifications">
@@ -91,7 +95,7 @@ export function WorkflowPage() {
         </div>
         <div className="flex min-w-0 flex-col gap-4">
           <ActivityLog events={events.data ?? []} />
-          <AgentRuns runs={agent_runs} />
+          <AgentRuns runs={agent_runs.filter((r) => !r.task_id)} />
         </div>
       </div>
 

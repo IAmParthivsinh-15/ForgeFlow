@@ -15,7 +15,7 @@ from forgeflow.schemas.events import Event, Topics
 
 logger = logging.getLogger(__name__)
 
-ALL_TOPICS = (Topics.WORKFLOW, Topics.AGENT)
+ALL_TOPICS = (Topics.WORKFLOW, Topics.AGENT, Topics.TASK)
 
 
 def serialize(event: Event) -> bytes:

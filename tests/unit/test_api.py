@@ -61,3 +61,36 @@ async def test_error_mapping(client):
 
 async def test_repositories_listing(client):
     assert (await client.get("/api/v1/repositories")).json() == ["demo-app"]
+
+
+async def test_task_endpoints_and_diffs(client, container, git_repo):
+    from tests.conftest import drive
+
+    svc = container.service
+    wf = await svc.create_workflow("Add a status page", "app")
+    await svc.process_analysis(wf.workflow_id, 1)
+    [q] = await container.store.list_questions(wf.workflow_id)
+    await svc.answer_question(q.question_id, "A", None)
+    await svc.process_analysis(wf.workflow_id, 2)
+    await container.execution.start_execution(wf.workflow_id)
+    await drive(container, wf.workflow_id)
+
+    tasks = (await client.get(f"/api/v1/workflows/{wf.workflow_id}/tasks")).json()
+    assert [t["key"] for t in tasks][0] == "T1"
+    backend = next(t for t in tasks if t["key"] == "T2-backend")
+    assert (await client.get(f"/api/v1/tasks/{backend['task_id']}")).json()["status"] == "COMPLETED"
+
+    diff = (await client.get(f"/api/v1/tasks/{backend['task_id']}/diff")).text
+    assert "+++ b/forgeflow-demo/backend/T2-backend.md" in diff
+    assert "frontend" not in diff  # only the task's own commit
+
+    full = (await client.get(f"/api/v1/workflows/{wf.workflow_id}/diff")).text
+    assert "T2-backend.md" in full and "T3-frontend.md" in full and "CHANGES.md" in full
+
+    workspaces = (await client.get(f"/api/v1/workspaces?workflow_id={wf.workflow_id}")).json()
+    assert len(workspaces) == 4
+    detail = (await client.get(f"/api/v1/workflows/{wf.workflow_id}")).json()
+    assert len(detail["tasks"]) == 5
+
+    r = await client.post(f"/api/v1/tasks/{backend['task_id']}/retry")
+    assert r.status_code == 422  # completed tasks cannot be retried

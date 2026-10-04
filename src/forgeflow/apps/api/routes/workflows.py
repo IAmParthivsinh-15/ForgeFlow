@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from forgeflow.apps.api.deps import ContainerDep
 from forgeflow.platform.orchestration.service import MAX_REQUEST_CHARS
 from forgeflow.schemas.requirement import ClarificationQuestion, RequirementSpecification
+from forgeflow.schemas.task import Task
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
 
 router = APIRouter(prefix="/api/v1", tags=["workflows"])
@@ -31,6 +32,7 @@ class WorkflowDetail(BaseModel):
     specification: RequirementSpecification | None
     questions: list[ClarificationQuestion]
     agent_runs: list[AgentRunRecord]
+    tasks: list[Task]
 
 
 class EventOut(BaseModel):
@@ -59,11 +61,13 @@ async def get_workflow(workflow_id: str, c: ContainerDep) -> WorkflowDetail:
         specification=await c.store.get_specification(workflow_id),
         questions=await c.store.list_questions(workflow_id),
         agent_runs=await c.store.list_agent_runs(workflow_id),
+        tasks=await c.store.list_tasks(workflow_id),
     )
 
 
 @router.post("/workflows/{workflow_id}/cancel")
 async def cancel_workflow(workflow_id: str, c: ContainerDep) -> Workflow:
+    """Cancels the workflow and every open task; running agents stop at their next heartbeat."""
     return await c.service.cancel_workflow(workflow_id)
 
 
