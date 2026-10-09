@@ -12,13 +12,17 @@ Behaviour:
   changes requested in round 1 (to demonstrate the repair loop);
 - security: maps scanner findings onto OWASP categories;
 - QA: PASS when an executed test passed, FAIL when it failed, else UNCERTAIN; asks
-  the Developer one A2A question to exercise the channel;
+  the Developer one A2A question to exercise the channel. For browser_test criteria
+  it stands in for the LLM's reasoning with a fixed navigate -> snapshot ->
+  screenshot sequence through the real Playwright MCP proxies (so the browser path is
+  exercised end to end offline); a real QA agent chooses its own tool calls;
 - CI diagnosis / A2A answers: deterministic text.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+import json
+from typing import Any, Literal
 
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.platform.orchestration.gateway import (
@@ -61,9 +65,24 @@ from forgeflow.schemas.workflow import IntakeAssessment, Intent, ProviderAttempt
 from forgeflow.tools.filesystem.globs import literal_prefix
 
 FAKE_PROMPT_VERSION = "fake-1"
-_FAKE_ATTEMPT = ProviderAttempt(
-    provider="fake", model="deterministic", status="succeeded", latency_ms=0
-)
+# Pinned fake model ids per role, so L4 rules ("the reviewer is a different model from
+# the implementer") are enforced and testable offline.
+FAKE_MODELS = {
+    "implementer": "implementer-1",
+    "reviewer": "reviewer-1",
+    "analyst": "analyst-1",
+}
+
+
+def _attempt(role: str) -> ProviderAttempt:
+    return ProviderAttempt(
+        provider="fake", model=FAKE_MODELS[role], status="succeeded", latency_ms=0
+    )
+
+
+_FAKE_ATTEMPT = _attempt("analyst")
+_IMPLEMENTER = _attempt("implementer")
+_REVIEWER = _attempt("reviewer")
 
 _KEYWORDS: list[tuple[Intent, tuple[str, ...]]] = [
     ("code_review", ("review pr", "review the pr", "pull request", "code review")),
@@ -86,6 +105,11 @@ _CAPABILITIES: dict[str, RequiredCapabilities] = {
 }
 
 _SECURITY_TERMS = ("auth", "password", "login", "token", "oauth", "secret", "permission")
+_BROWSER_TERMS = ("browser", "web page", "webpage", "page shows", "button", "homepage", "ui ")
+
+
+def _tool(ctx: AgentRuntimeContext, suffix: str) -> Any:
+    return next((t for t in ctx.extra_tools if getattr(t, "name", "").endswith(suffix)), None)
 
 
 def classify(request: str) -> Intent:
@@ -147,7 +171,17 @@ class FakeAgentGateway:
                     if capabilities.development
                     else "manual_review",
                 )
-            ],
+            ]
+            + (
+                [
+                    AnalyzerAcceptanceCriterion(
+                        description="The page renders in a browser and shows the change",
+                        verification="browser_test",
+                    )
+                ]
+                if any(t in f"{analysis.request.lower()} " for t in _BROWSER_TERMS)
+                else []
+            ),
             required_capabilities=capabilities,
             risk_level="high" if capabilities.security else "medium",
             repository_observations=[],
@@ -200,7 +234,7 @@ class FakeAgentGateway:
         for sub in subtasks:  # trimmed plans must not reference removed keys
             sub.depends_on = [d for d in sub.depends_on if d in {s.key for s in subtasks}]
         plan = DevelopmentPlan(summary=request.specification.summary, subtasks=subtasks)
-        return AgentOutcome(plan, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(plan, FAKE_PROMPT_VERSION, [_IMPLEMENTER])
 
     async def implement_subtask(
         self, ctx: AgentRuntimeContext, request: ImplementationRequest
@@ -219,7 +253,7 @@ class FakeAgentGateway:
         if ctx.checks is not None and "test" in request.available_checks:
             await ctx.checks.run("test")
         report = ImplementationReport(summary=f"{task.title}: wrote {', '.join(written)}")
-        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_IMPLEMENTER])
 
     async def resolve_conflicts(
         self, ctx: AgentRuntimeContext, request: ConflictRequest
@@ -236,7 +270,7 @@ class FakeAgentGateway:
         report = ResolutionReport(
             summary="Kept both sides of every conflict.", resolved_files=request.conflicted_files
         )
-        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_IMPLEMENTER])
 
     async def review_changes(
         self, ctx: AgentRuntimeContext, request: ReviewRequest
@@ -268,7 +302,7 @@ class FakeAgentGateway:
                 ),
                 requirements_alignment="The change addresses the acceptance criteria.",
             )
-        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(report, FAKE_PROMPT_VERSION, [_REVIEWER])
 
     async def assess_security(
         self, ctx: AgentRuntimeContext, request: SecurityRequest
@@ -293,7 +327,7 @@ class FakeAgentGateway:
             f"{sum(s.status == 'completed' for s in request.scans)} completed scanner(s).",
             categories=categories,
         )
-        return AgentOutcome(assessment, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(assessment, FAKE_PROMPT_VERSION, [_REVIEWER])
 
     async def verify_acceptance(
         self, ctx: AgentRuntimeContext, request: QARequest
@@ -302,10 +336,13 @@ class FakeAgentGateway:
             first = request.specification.acceptance_criteria[0].id
             await ctx.a2a.ask(f"Which test validates {first}?", context=first)
         tests = [c for c in request.executed_checks if c.kind == "test"]
+        browser = await self._browse(ctx, request)
         criteria = []
         for ac in request.specification.acceptance_criteria:
             status: Literal["PASS", "FAIL", "UNCERTAIN"]
-            if tests and all(c.passed for c in tests):
+            if ac.verification == "browser_test":
+                status, evidence = browser
+            elif tests and all(c.passed for c in tests):
                 status, evidence = "PASS", f"`{tests[0].command}` passed"
             elif tests:
                 status, evidence = "FAIL", f"`{tests[0].command}` failed"
@@ -318,6 +355,27 @@ class FakeAgentGateway:
             )
         assessment = QAAssessment(summary=f"Evaluated {len(criteria)} criteria.", criteria=criteria)
         return AgentOutcome(assessment, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+
+    async def _browse(
+        self, ctx: AgentRuntimeContext, request: QARequest
+    ) -> tuple[Literal["PASS", "FAIL", "UNCERTAIN"], str]:
+        navigate = _tool(ctx, "browser_navigate")
+        snapshot = _tool(ctx, "browser_snapshot")
+        if not request.app_url:
+            return "UNCERTAIN", f"no app was served: {request.browser_note or 'not configured'}"
+        if navigate is None or snapshot is None:
+            return "UNCERTAIN", "Playwright MCP tools are not available to the QA agent"
+        opened = await navigate.on_invoke_tool(None, json.dumps({"url": request.app_url}))
+        if opened.startswith(("ERROR", "DENIED")):
+            return "UNCERTAIN", f"could not open {request.app_url}: {opened[:200]}"
+        page = await snapshot.on_invoke_tool(None, "{}")
+        screenshot = _tool(ctx, "browser_take_screenshot")
+        if screenshot is not None:
+            await screenshot.on_invoke_tool(None, json.dumps({"type": "png"}))
+        if page.startswith(("ERROR", "DENIED")) or not page.strip():
+            return "UNCERTAIN", f"no accessibility snapshot: {page[:200]}"
+        excerpt = " ".join(page.split())[:240]
+        return "PASS", f"Opened {request.app_url}; the page snapshot shows: {excerpt}"
 
     async def analyze_ci_failure(
         self, ctx: AgentRuntimeContext, request: CIRequest
@@ -340,4 +398,4 @@ class FakeAgentGateway:
             answer=f"The repository's test suite covers it ({request.context or 'see tests'}).",
             references=[request.context] if request.context else [],
         )
-        return AgentOutcome(answer, FAKE_PROMPT_VERSION, [_FAKE_ATTEMPT])
+        return AgentOutcome(answer, FAKE_PROMPT_VERSION, [_IMPLEMENTER])

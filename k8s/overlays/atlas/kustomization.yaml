@@ -1,0 +1,17 @@
+# MongoDB Atlas instead of the in-cluster MongoDB; everything else in-cluster.
+#   cp k8s/overlays/atlas/secrets.env.example k8s/overlays/atlas/secrets.env   # then edit
+#   kubectl apply -k k8s/overlays/atlas
+# Atlas > Network Access must allow the cluster's egress IP.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forgeflow
+resources:
+  - ../../base
+  - ../../data/redis
+  - ../../data/kafka
+  - ../../data/elasticsearch
+secretGenerator:
+  # Holds MONGODB_URI (mongodb+srv://...) with the database password: never commit it.
+  - name: forgeflow-secrets
+    envs:
+      - secrets.env

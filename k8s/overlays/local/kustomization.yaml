@@ -1,0 +1,38 @@
+# minikube / single-node cluster with every data service in-cluster.
+#   cp k8s/overlays/local/secrets.env.example k8s/overlays/local/secrets.env   # then edit
+#   kubectl apply -k k8s/overlays/local
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forgeflow
+resources:
+  - ../../base
+  - ../../data/mongodb
+  - ../../data/redis
+  - ../../data/kafka
+  - ../../data/elasticsearch
+  - repos-volume.yaml
+configMapGenerator:
+  - name: forgeflow-config
+    behavior: merge
+    literals:
+      - FORGEFLOW_ENV=development
+      - MONGODB_URI=mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+      # Deterministic agents until an LLM key is set in secrets.env; then set to false.
+      - FAKE_LLM=true
+secretGenerator:
+  # Git-ignored; copy secrets.env.example. Never commit real values.
+  - name: forgeflow-secrets
+    envs:
+      - secrets.env
+patches:
+  # Repositories come from the host folder mounted into minikube (see k8s/README.md).
+  - target:
+      kind: PersistentVolumeClaim
+      name: forgeflow-repos
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: ""
+      - op: add
+        path: /spec/volumeName
+        value: forgeflow-repos-host

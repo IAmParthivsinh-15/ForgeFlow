@@ -1,0 +1,23 @@
+# Deployed by Argo CD from git (spec sections 108, 158). Nothing secret is in git:
+# create the Secret out of band (or with Sealed Secrets / External Secrets):
+#   kubectl -n forgeflow create secret generic forgeflow-secrets --from-env-file=secrets.env
+# Jenkins updates the image tags below on every main build (Jenkinsfile, stage GitOps).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forgeflow
+resources:
+  - ../../base
+  - ../../data/mongodb
+  - ../../data/redis
+  - ../../data/kafka
+  - ../../data/elasticsearch
+configMapGenerator:
+  - name: forgeflow-config
+    behavior: merge
+    literals:
+      - MONGODB_URI=mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+images:
+  - name: forgeflow/python
+    newTag: dev
+  - name: forgeflow/frontend
+    newTag: dev

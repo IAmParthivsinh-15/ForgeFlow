@@ -46,6 +46,14 @@ class EventType:
     WORKFLOW_AWAITING_DECISION = "workflow.awaiting_decision"
     WORKFLOW_COMPLETED = "workflow.completed"
     A2A_EXCHANGE = "a2a.exchange"
+    APPROVAL_REQUESTED = "approval.requested"
+    APPROVAL_RESOLVED = "approval.resolved"
+    PULL_REQUEST_OPENED = "github.pull_request_opened"
+    # A capability (MCP tool, connector operation) was used - browser actions included.
+    CAPABILITY_USED = "capability.used"
+    ARTIFACT_STORED = "artifact.stored"
+    PREVIEW_STARTED = "preview.started"
+    CI_BUILD_COMPLETED = "ci.build_completed"
 
 
 class Topics:

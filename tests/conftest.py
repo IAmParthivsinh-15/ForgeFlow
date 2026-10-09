@@ -12,7 +12,10 @@ from forgeflow.platform.orchestration.fake_gateway import FakeAgentGateway
 from forgeflow.platform.state.memory import InMemoryWorkflowStore
 from forgeflow.schemas.task import TaskStatus
 from forgeflow.tools.security.scanners import ScannerSuite
-from tests.fakes import FakeCI
+from tests.fakes import FakeCI, FakeGitHub
+
+ROOT = Path(__file__).resolve().parents[1]
+PRESETS = ROOT / "config" / "mcp_presets.yaml"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -53,7 +56,47 @@ def git_repo(repos_root: Path) -> Path:
 
 
 @pytest.fixture
-def settings(repos_root: Path, tmp_path: Path) -> Settings:
+def mcp_allowlist(tmp_path: Path) -> Path:
+    import sys
+
+    import yaml
+
+    path = tmp_path / "mcp_allowlist.yaml"
+    server = Path(__file__).with_name("mcp_test_server.py").resolve()
+    browser = Path(__file__).with_name("mcp_browser_server.py").resolve()
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "servers": {
+                    "test": {"command": sys.executable, "args": [str(server)], "env": []},
+                    "browser-test": {
+                        "command": sys.executable,
+                        "args": [str(browser)],
+                        "env": [],
+                    },
+                }
+            }
+        )
+    )
+    return path
+
+
+@pytest.fixture
+def mcp_presets(tmp_path: Path) -> Path:
+    """The real Playwright preset, pointed at the stdio stand-in instead of the container."""
+    import yaml
+
+    real = yaml.safe_load(PRESETS.read_text(encoding="utf-8"))["presets"]["playwright"]
+    preset = {**real, "transport": "stdio", "stdio_server": "browser-test", "url": None}
+    path = tmp_path / "mcp_presets.yaml"
+    path.write_text(yaml.safe_dump({"presets": {"playwright": preset}}))
+    return path
+
+
+@pytest.fixture
+def settings(repos_root: Path, tmp_path: Path, mcp_allowlist: Path, mcp_presets: Path) -> Settings:
+    from forgeflow.extensibility.secrets import generate_key
+
     return Settings(
         _env_file=None,
         forgeflow_env="test",
@@ -63,6 +106,18 @@ def settings(repos_root: Path, tmp_path: Path) -> Settings:
         max_clarification_rounds=2,
         task_retry_backoff_seconds=0,
         heartbeat_interval_seconds=0.05,
+        forgeflow_secret_key=generate_key(),
+        approval_poll_seconds=0.02,
+        approval_timeout_seconds=30,
+        mcp_stdio_allowlist_path=mcp_allowlist,
+        mcp_presets_path=mcp_presets,
+        builtin_skills_path=ROOT / "config" / "skills",
+        artifacts_root=tmp_path / "artifacts",
+        preview_host="127.0.0.1",
+        preview_ports="47173-47176",
+        preview_start_timeout_seconds=15,
+        # Pushes go to local bare repositories instead of github.com.
+        github_push_url_template=str(tmp_path / "remotes" / "{repository}.git"),
     )
 
 
@@ -77,11 +132,30 @@ def fake_ci() -> FakeCI:
 
 
 @pytest.fixture
-def container(store, settings, fake_ci) -> Container:
-    c = assemble(settings, store, FakeAgentGateway())
+def fake_github() -> FakeGitHub:
+    return FakeGitHub()
+
+
+@pytest.fixture
+def container(store, settings, fake_ci, fake_github) -> Container:
+    import httpx
+
+    from forgeflow.integrations.github.client import GitHubClient
+    from forgeflow.knowledge.index import InMemoryKnowledgeIndex
+
+    c = assemble(settings, store, FakeAgentGateway(), knowledge_index=InMemoryKnowledgeIndex())
     c.ci = fake_ci
     c.scanners = ScannerSuite([])  # real scanners are exercised in test_scanners.py
+    assert c.extensibility is not None
+    c.extensibility.connectors.github_factory = lambda token, url: GitHubClient(
+        token, url, transport=httpx.MockTransport(fake_github)
+    )
     return c
+
+
+@pytest.fixture
+def ext(container):
+    return container.extensibility
 
 
 @pytest.fixture

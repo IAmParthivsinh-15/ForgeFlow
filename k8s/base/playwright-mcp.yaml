@@ -1,0 +1,53 @@
+# Browser for QA (spec sections 28, 266A). Network policy: reachable only from the API
+# (tool discovery) and agent workers; may only connect to agent workers' preview ports.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playwright-mcp
+  labels:
+    app.kubernetes.io/name: playwright-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: playwright-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: playwright-mcp
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: playwright-mcp
+          image: mcr.microsoft.com/playwright/mcp:v0.0.82
+          args:
+            - --port=8931
+            - --host=0.0.0.0
+            - --allowed-hosts=playwright-mcp
+            - --isolated
+            - --no-webmcp
+          ports:
+            - name: mcp
+              containerPort: 8931
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playwright-mcp
+  labels:
+    app.kubernetes.io/name: playwright-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: playwright-mcp
+  ports:
+    - name: mcp
+      port: 8931
+      targetPort: mcp

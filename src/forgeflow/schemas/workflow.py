@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from forgeflow.schemas.extensibility import CapabilitySnapshot
 from forgeflow.schemas.verification import FinalReport
 
 
@@ -26,6 +27,8 @@ class WorkflowStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     PAUSED = "PAUSED"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    PUBLISHING = "PUBLISHING"
     CANCELLED = "CANCELLED"
 
 
@@ -84,10 +87,22 @@ class ExecutionInfo(BaseModel):
     finished_at: datetime | None = None
 
 
+class PullRequestInfo(BaseModel):
+    repository: str
+    number: int
+    url: str
+    branch: str
+    base: str
+    state: str = "open"
+    draft: bool = False
+    opened_at: datetime
+
+
 class Workflow(BaseModel):
     workflow_id: str
     request: str
     repository_path: str | None = None
+    project_id: str | None = None
     status: WorkflowStatus
     intake: IntakeAssessment | None = None
     requirement_version: int = 0
@@ -95,6 +110,11 @@ class Workflow(BaseModel):
     route_plan: RoutePlan | None = None
     execution: ExecutionInfo | None = None
     report: FinalReport | None = None
+    capability_snapshot: CapabilitySnapshot | None = None
+    pull_request: PullRequestInfo | None = None
+    # L4 autonomy: the run that owns this workflow (additional.md section 3).
+    trace_id: str | None = None
+    autonomous: bool = False
     error: str | None = None
     # Optimistic-concurrency revision; maintained by the store.
     revision: int = 0
@@ -108,6 +128,9 @@ class ProviderAttempt(BaseModel):
     status: Literal["succeeded", "failed"]
     latency_ms: int
     fallback_reason: str | None = None
+    # Usage reported by the provider (0 when unknown, e.g. fake agents).
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class AgentRunRecord(BaseModel):

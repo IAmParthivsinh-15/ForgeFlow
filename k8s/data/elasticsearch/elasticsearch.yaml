@@ -1,0 +1,83 @@
+# Engineering history and repository index (spec sections 36-37). Optional: ForgeFlow
+# keeps working without it. Security is off for a local cluster only; production needs
+# TLS + authentication (and ELASTICSEARCH_URL with credentials in the Secret).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  labels:
+    app.kubernetes.io/name: elasticsearch
+spec:
+  serviceName: elasticsearch-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+        forgeflow.dev/role: data
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - { name: discovery.type, value: single-node }
+            - { name: xpack.security.enabled, value: "false" }
+            - { name: ES_JAVA_OPTS, value: "-Xms512m -Xmx512m" }
+            - { name: cluster.routing.allocation.disk.threshold_enabled, value: "false" }
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              memory: 1500Mi
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  labels:
+    app.kubernetes.io/name: elasticsearch
+spec:
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-headless
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200

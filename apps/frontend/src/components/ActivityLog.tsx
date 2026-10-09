@@ -1,7 +1,7 @@
 import type { AgentRun, WorkflowEvent } from "../lib/api";
 import { Card } from "./SpecificationView";
 
-function describe(event: WorkflowEvent): string {
+export function describe(event: WorkflowEvent): string {
   const p = event.payload;
   switch (event.event_type) {
     case "workflow.status_changed":
@@ -55,6 +55,18 @@ function describe(event: WorkflowEvent): string {
       return `Workflow completed: ${p.outcome}`;
     case "a2a.exchange":
       return `A2A ${p.sender} → ${p.receiver}: ${p.request} (${p.status})`;
+    case "approval.requested":
+      return `Approval requested: ${p.summary}`;
+    case "approval.resolved":
+      return `Approval ${p.status}: ${p.summary}`;
+    case "github.pull_request_opened":
+      return `Pull request #${p.number} opened on ${p.repository}`;
+    case "capability.used":
+      return `${p.agent} used ${p.capability} (${p.result}${p.approval === "user_approved" ? ", approved" : ""})`;
+    case "preview.started":
+      return `${p.key} serving the commit under test at ${p.url} for the browser`;
+    case "ci.build_completed":
+      return `CI ${p.job} #${p.build_number}: ${p.result}`;
     case "workspace.created":
       return `${p.key} worktree ready on ${p.branch}`;
     case "task.ready":

@@ -1,0 +1,132 @@
+# ForgeFlow L4 decision contract (additional.md sections 1-2). Versioned: a change is a
+# new `version`, applies to runs started afterwards, and is recorded on every run.
+# Agents cannot change this file; the commander only reads it.
+
+version: contract_v1
+policy_version: policy_v1
+
+# Section 1 - the bounded responsibility.
+responsibility: >-
+  ForgeFlow is continuously responsible for processing eligible low-risk bug issues
+  labelled `forgeflow` in the configured GitHub repository, resolving them within its
+  pre-authorised scope (a verified draft pull request linked on the issue), and
+  verifying closure against GitHub; it escalates out-of-scope, unsafe, or repeatedly
+  failing work with evidence.
+
+# observe    = record decisions, make no external changes (rollout step 1)
+# autonomous = act within the action profile (rollout step 2+)
+mode: observe
+
+# Section 2.1 - triggers. Both enter the same idempotent intake path.
+source:
+  system: github
+  # owner/repo of the single work source, and the ForgeFlow project (repos/<folder>)
+  # that holds its checkout. Empty = not configured (triggers stay idle).
+  repository: ""
+  project_repository_path: ""
+  # Service identity: a GitHub connector (Extensibility > Connectors) owned by a
+  # non-human account or GitHub App installation - never an engineer's token.
+  connector_id: ""
+  webhook_events: [issues]
+  sweep_interval_seconds: 300
+
+# Section 2.1/2.3 - what is eligible. Anything else is CLOSE_NO_ACTION (with reason).
+eligibility:
+  required_labels: [forgeflow]
+  any_of_labels: [bug]
+  excluded_labels: [wontfix, duplicate, invalid, security, needs-design]
+  states: [open]
+  max_body_chars: 20000
+  # Specifications above this risk are out of the low-risk scope -> ESCALATE.
+  max_risk_level: medium
+
+# Section 2.2 - authority order when sources disagree (first wins).
+source_authority:
+  - source_of_truth      # issue / PR / repository state, CI and test results
+  - approved_policy      # this contract, repository policy, action profile, project config
+  - run_evidence         # saved plan, tool outputs, tests, review findings, trace events
+  - model_interpretation # never overrides the above
+
+# Section 2.5 - authority tiers. Capability ids from the gateway catalog.
+action_profile:
+  id: repo_low_risk_changes_v1
+  auto:
+    - github.repository.read
+    - github.issue.read
+    - github.branch.push              # forgeflow/* branches only (enforced in code)
+    - github.pull_request.create_draft
+    - github.pull_request.status
+    - github.issue.comment            # evidence/status comments, rate-limited below
+    - workspace.write                 # isolated worktrees, file scope enforced
+    - checks.run                      # allow-listed repository commands
+  ask:
+    - github.pull_request.create      # non-draft PR
+    - github.pull_request.merge
+    - deployment.sync
+    - deployment.rollback
+    - policy.change
+  deny:
+    - github.repository.delete
+    - github.branch.force_push
+    - github.branch.delete_protected
+    - secrets.read_raw
+    - audit.disable
+    - limits.raise
+  max_comments_per_run: 3
+
+# Section 4 - immutable per-run limits, snapshotted when a run starts.
+limits:
+  max_workers: 3
+  # Pinned models. In FAKE_LLM mode the fake gateway reports fake/* ids.
+  allowed_models:
+    - fake/implementer-1
+    - fake/reviewer-1
+    - fake/analyst-1
+  budgets:
+    max_tokens: 200000
+    max_cost_usd: 2.00
+    max_runtime_seconds: 3600
+    max_retries: 3
+  # USD per 1k tokens, used for the cost counter. Unknown models count as 0 and are
+  # flagged in the run evidence.
+  model_prices_per_1k_tokens: {}
+
+# Section 4 - circuit breakers: stop spawning and move to PAUSED_BY_GUARDRAIL.
+circuit_breakers:
+  max_failed_tasks: 4
+  max_provider_failures: 3
+  max_capability_errors: 5
+  max_active_runs: 5            # backlog / concurrency across runs
+
+# Section 3 - plan rules.
+plan:
+  require_independent_reviewer: true   # reviewer model must differ from implementer
+  min_parallel_workers: 2              # when the work is separable
+  max_replans: 1
+
+# Section 2.7 - machine-checkable closure for a code change.
+closure_checks:
+  - change_exists_in_provider
+  - required_ci_passes
+  - independent_review_passes
+  - security_checks_pass
+  - source_state_reverified
+  - evidence_stored
+
+# Section 2.6 - the named escalation conditions (ids used on every escalation).
+escalation_conditions:
+  conflicting_requirements: Requirements or authoritative sources conflict and the contract cannot resolve them
+  action_requires_authority: The required action is marked ASK or DENY
+  plan_invalid: Plan validation failed and a bounded re-plan also failed
+  retry_limit: The task reached its retry limit
+  dependency_unavailable: A connector, MCP server, secret, environment or source is unavailable beyond the recovery window
+  blocking_review: Independent review found a blocking issue that remains after the repair loop
+  circuit_breaker: A circuit breaker tripped
+  emergency_stop: Emergency stop was activated
+  verification_failed: Verification cannot establish the expected state, or evidence is contradictory or incomplete
+  out_of_scope: The work exceeds the contract's low-risk scope
+
+# Alerts (section 9): also exposed as Prometheus metrics; optional webhook.
+alerts:
+  run_stuck_after_seconds: 3600
+  webhook_url_env: FORGEFLOW_ALERT_WEBHOOK_URL

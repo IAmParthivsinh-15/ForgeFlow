@@ -25,13 +25,14 @@ from agents import (
     Model,
     ModelBehaviorError,
     OpenAIChatCompletionsModel,
+    RunConfig,
     Runner,
 )
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
 from forgeflow.core.errors import AllProvidersFailed
-from forgeflow.core.logging import log_event
+from forgeflow.core.logging import bind_context, log_event
 from forgeflow.models.config import ModelRegistry, ResolvedModel
 from forgeflow.schemas.workflow import ProviderAttempt
 
@@ -91,11 +92,49 @@ def _summarise_validation(exc: ValidationError) -> str:
     return "; ".join(parts[:10])
 
 
+def with_capabilities(agent: Agent[Any], context: Any) -> Agent[Any]:
+    """Runtime agent = base agent + resolved skills + MCP proxy tools (spec section 225)."""
+    prompt = getattr(context, "skills_prompt", "") or ""
+    extra = list(getattr(context, "extra_tools", None) or [])
+    if not prompt and not extra:
+        return agent
+    instructions = agent.instructions if isinstance(agent.instructions, str) else ""
+    # Keep the output contract last: insert skills before the response-format section.
+    marker = "\n\n# Response Format\n"
+    if prompt and marker in instructions:
+        head, tail = instructions.split(marker, 1)
+        instructions = head + prompt + marker + tail
+    else:
+        instructions += prompt
+    return agent.clone(instructions=instructions, tools=[*agent.tools, *extra])
+
+
 class AgentExecutor:
-    def __init__(self, registry: ModelRegistry, max_turns: int = 20, repair_attempts: int = 2):
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        max_turns: int = 20,
+        repair_attempts: int = 2,
+        include_content: bool = False,
+    ):
         self.registry = registry
         self.max_turns = max_turns
         self.repair_attempts = repair_attempts
+        # Whether traces may contain prompt/response text (spec section 68).
+        self.include_content = include_content
+
+    def _run_config(self, agent: Agent[Any], context: Any) -> RunConfig:
+        """Correlate SDK traces with ForgeFlow ids (spec section 142)."""
+        workflow_id = getattr(context, "workflow_id", None)
+        task_id = getattr(context, "task_id", None)
+        bind_context(agent=agent.name)
+        metadata = {k: v for k, v in {"workflow_id": workflow_id, "task_id": task_id}.items() if v}
+        return RunConfig(
+            workflow_name=f"forgeflow {agent.name}",
+            group_id=workflow_id,
+            trace_metadata={**metadata, "agent": agent.name},
+            trace_include_sensitive_data=self.include_content,
+        )
 
     def _model(self, resolved: ResolvedModel) -> Model:
         client = AsyncOpenAI(
@@ -125,9 +164,10 @@ class AgentExecutor:
         attempts: list[ProviderAttempt] = []
         for resolved in chain:
             started = time.perf_counter()
+            usage: dict[str, int] = {}
             try:
                 output = await self._run_once(
-                    resolved, build_agent, input_text, output_type, context
+                    resolved, build_agent, input_text, output_type, context, usage
                 )
             except (
                 openai.APIError,
@@ -162,6 +202,8 @@ class AgentExecutor:
                     model=resolved.model,
                     status="succeeded",
                     latency_ms=int((time.perf_counter() - started) * 1000),
+                    input_tokens=usage.get("input", 0),
+                    output_tokens=usage.get("output", 0),
                 )
             )
             return StructuredRun(output=output, attempts=attempts)
@@ -176,15 +218,42 @@ class AgentExecutor:
         input_text: str,
         output_type: type[T],
         context: Any,
+        usage: dict[str, int] | None = None,
     ) -> T:
+        usage = usage if usage is not None else {}
+
+        def count(result: Any) -> None:
+            total = getattr(getattr(result, "context_wrapper", None), "usage", None)
+            if total is not None:
+                usage["input"] = usage.get("input", 0) + int(getattr(total, "input_tokens", 0) or 0)
+                usage["output"] = usage.get("output", 0) + int(
+                    getattr(total, "output_tokens", 0) or 0
+                )
+
         model = self._model(resolved)
         if resolved.structured_output == "json_schema":
-            agent = build_agent(model, AgentOutputSchema(output_type, strict_json_schema=False), "")
-            result = await Runner.run(agent, input_text, context=context, max_turns=self.max_turns)
+            agent = with_capabilities(
+                build_agent(model, AgentOutputSchema(output_type, strict_json_schema=False), ""),
+                context,
+            )
+            result = await Runner.run(
+                agent,
+                input_text,
+                context=context,
+                max_turns=self.max_turns,
+                run_config=self._run_config(agent, context),
+            )
+            count(result)
             return _parse(output_type, result.final_output)
 
-        agent = build_agent(model, None, schema_instructions(output_type))
-        result = await Runner.run(agent, input_text, context=context, max_turns=self.max_turns)
+        agent = with_capabilities(
+            build_agent(model, None, schema_instructions(output_type)), context
+        )
+        run_config = self._run_config(agent, context)
+        result = await Runner.run(
+            agent, input_text, context=context, max_turns=self.max_turns, run_config=run_config
+        )
+        count(result)
         for attempt in range(self.repair_attempts + 1):
             try:
                 return _parse(output_type, str(result.final_output or ""))
@@ -196,5 +265,8 @@ class AgentExecutor:
                     "corrected JSON object that satisfies the schema."
                 )
                 history = result.to_input_list() + [{"role": "user", "content": repair}]
-                result = await Runner.run(agent, history, context=context, max_turns=self.max_turns)
+                result = await Runner.run(
+                    agent, history, context=context, max_turns=self.max_turns, run_config=run_config
+                )
+                count(result)
         raise InvalidStructuredOutput("unreachable")

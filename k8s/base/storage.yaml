@@ -1,0 +1,32 @@
+# Shared volumes. API, orchestrator and agent workers all read repositories and
+# worktrees, so these claims need ReadWriteMany storage in a multi-node cluster
+# (NFS, EFS, Azure Files, ...). The local overlay binds `repos` to a host folder.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgeflow-repos
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgeflow-workspaces
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forgeflow-artifacts
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 2Gi

@@ -103,6 +103,7 @@ def build_report(
         branch=execution.integration_branch if execution else None,
         commit=(execution.target_commit if execution else None),
         ci_build_url=ci_url,
+        pull_request_url=wf.pull_request.url if wf.pull_request else None,
         pr_title=pr_title,
         generated_at=utcnow(),
     )

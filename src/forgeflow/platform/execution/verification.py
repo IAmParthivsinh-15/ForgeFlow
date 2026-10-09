@@ -7,19 +7,23 @@ whether it blocks, using rules that agents cannot override:
     review    blocking if decision is 'blocked', or 'changes_requested' with a high+ finding
     security  blocking if a high/critical finding (agent or scanner) touches the change
     qa        blocking if any acceptance criterion FAILs or the test command fails;
-              PASS without executed passing tests is downgraded to UNCERTAIN
+              PASS without executed passing tests is downgraded to UNCERTAIN;
+              a browser_test PASS needs successful Playwright MCP actions in this run
     ci        blocking unless the Jenkins build result is SUCCESS
 """
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
+from typing import Any
 
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.core.config import Settings
-from forgeflow.core.errors import CIUnavailable, ValidationFailed
+from forgeflow.core.errors import CIUnavailable, PolicyViolation, ValidationFailed
 from forgeflow.core.ids import utcnow
+from forgeflow.extensibility.projects import project_id_for
 from forgeflow.platform.a2a.channel import A2AChannel
 from forgeflow.platform.ci.jenkins import CIProvider, JenkinsProvider
 from forgeflow.platform.ci.pipeline import build_pipeline_spec, render_jenkinsfile
@@ -28,7 +32,9 @@ from forgeflow.platform.execution.common import (
     agent_event,
     check_event,
     run_from_outcome,
+    run_with_capabilities,
 )
+from forgeflow.platform.orchestration.execution import task_event
 from forgeflow.platform.orchestration.gateway import (
     A2ARequest,
     AgentGateway,
@@ -40,6 +46,7 @@ from forgeflow.platform.orchestration.gateway import (
 from forgeflow.platform.state.store import WorkflowStore
 from forgeflow.platform.verification.change_analyzer import analyze_changes
 from forgeflow.platform.worktrees.manager import PreparedWorkspace, WorktreeManager
+from forgeflow.schemas.events import EventType
 from forgeflow.schemas.requirement import RequirementSpecification
 from forgeflow.schemas.task import Task, TaskResult, TaskStatus
 from forgeflow.schemas.verification import (
@@ -53,6 +60,7 @@ from forgeflow.schemas.verification import (
     SecurityReport,
 )
 from forgeflow.schemas.workflow import AgentRunRecord, Workflow
+from forgeflow.tools.browser.preview import PortPool, PreviewServer, parse_ports, preview_host
 from forgeflow.tools.git.client import GitClient
 from forgeflow.tools.security.scanners import ScannerSuite
 from forgeflow.tools.shell.commands import CheckRunner
@@ -73,13 +81,20 @@ class VerificationStages:
         *,
         ci: CIProvider | None,
         scanners: ScannerSuite,
+        extensibility: Any = None,
+        knowledge: Any = None,
+        artifacts: Any = None,
     ) -> None:
         self.store = store
+        self.knowledge = knowledge
+        self.artifacts = artifacts
+        self.preview_ports = PortPool(parse_ports(settings.preview_ports))
         self.gateway = gateway
         self.worktrees = worktrees
         self.git = git
         self.settings = settings
         self.scanners = scanners
+        self.extensibility = extensibility
         self.ci = ci or JenkinsProvider(
             settings.jenkins_url,
             settings.jenkins_user,
@@ -112,6 +127,38 @@ class VerificationStages:
             await self.worktrees.remove(checkout.workspace)
 
     # ------------------------------------------------------------------ shared
+
+    async def _capable(self, wf, task, agent, ctx, spec, call, allowed_origins=None):
+        """Run an agent call with its resolved skills and MCP tools."""
+        context = " ".join(
+            [
+                spec.summary,
+                spec.goal,
+                *spec.scope.in_scope,
+                *(c.description for c in spec.checklist),
+                *(
+                    f"{ac.description} ({ac.verification.replace('_', ' ')})"
+                    for ac in spec.acceptance_criteria
+                ),
+                task.title,
+                task.instructions,
+                *task.file_scope,
+            ]
+        )
+        return await run_with_capabilities(
+            self.extensibility,
+            self.settings.local_user_id,
+            wf,
+            task,
+            agent,
+            ctx,
+            context,
+            call,
+            allowed_origins=allowed_origins,
+        )
+
+    def _repository_id(self, wf: Workflow) -> str:
+        return wf.project_id or project_id_for(wf.repository_path or "")
 
     async def _change(self, wf: Workflow) -> tuple[str, list[str]]:
         """(diff, changed files) between the base and the commit under verification."""
@@ -201,8 +248,15 @@ class VerificationStages:
             a2a=channel,
         )
         started = utcnow()
-        outcome = await self.gateway.review_changes(
-            ctx, ReviewRequest(spec, change, diff, round=task.round, previous_findings=prior)
+        outcome, manifest = await self._capable(
+            wf,
+            task,
+            "code_review",
+            ctx,
+            spec,
+            lambda: self.gateway.review_changes(
+                ctx, ReviewRequest(spec, change, diff, round=task.round, previous_findings=prior)
+            ),
         )
         runs.insert(0, run_from_outcome(task, "code_review", outcome, started))
         report = outcome.output
@@ -216,6 +270,7 @@ class VerificationStages:
         if blocking and not reasons:
             reasons = [f"review blocked: {report.summary}"]
         result = TaskResult(
+            capability_manifest=manifest,
             summary=report.summary,
             verdict="fail" if blocking else "pass",
             blocking=blocking,
@@ -250,16 +305,23 @@ class VerificationStages:
             a2a=channel,
         )
         started = utcnow()
-        outcome = await self.gateway.assess_security(
+        outcome, manifest = await self._capable(
+            wf,
+            task,
+            "security",
             ctx,
-            SecurityRequest(
-                spec,
-                change,
-                diff,
-                scans,
-                self.settings.owasp_edition,
-                round=task.round,
-                previous_findings=prior,
+            spec,
+            lambda: self.gateway.assess_security(
+                ctx,
+                SecurityRequest(
+                    spec,
+                    change,
+                    diff,
+                    scans,
+                    self.settings.owasp_edition,
+                    round=task.round,
+                    previous_findings=prior,
+                ),
             ),
         )
         runs.insert(0, run_from_outcome(task, "security", outcome, started))
@@ -308,6 +370,7 @@ class VerificationStages:
         incomplete = any(s.status in ("unavailable", "error") for s in scans)
         blocking = bool(severe)
         result = TaskResult(
+            capability_manifest=manifest,
             summary=assessment.summary,
             verdict="fail" if blocking else ("uncertain" if incomplete else "pass"),
             blocking=blocking,
@@ -349,12 +412,65 @@ class VerificationStages:
             diff=diff,
             a2a=channel,
         )
-        started = utcnow()
-        outcome = await self.gateway.verify_acceptance(
-            ctx, QARequest(spec, executed, available, round=task.round)
-        )
+        browser_ids = {
+            ac.id for ac in spec.acceptance_criteria if ac.verification == "browser_test"
+        }
+        events = []
+        note: str | None = None
+        async with contextlib.AsyncExitStack() as stack:
+            # A browser is started only when a criterion needs one (spec section 156).
+            if browser_ids:
+                try:
+                    preview = await stack.enter_async_context(
+                        PreviewServer(
+                            checkout.path,
+                            self.preview_ports,
+                            preview_host(
+                                self.settings.preview_host, self.settings.preview_peer_host
+                            ),
+                            timeout=self.settings.preview_start_timeout_seconds,
+                            check_timeout=self.settings.check_timeout_seconds,
+                            exclude_path=sys.prefix,
+                        )
+                    )
+                    ctx.app_url = preview.url
+                    events.append(
+                        task_event(
+                            task, EventType.PREVIEW_STARTED, url=preview.url, mode=preview.mode
+                        )
+                    )
+                except (ValidationFailed, PolicyViolation, OSError) as exc:
+                    note = str(exc)
+            started = utcnow()
+            outcome, manifest = await self._capable(
+                wf,
+                task,
+                "qa",
+                ctx,
+                spec,
+                lambda: self.gateway.verify_acceptance(
+                    ctx,
+                    QARequest(
+                        spec,
+                        executed,
+                        available,
+                        round=task.round,
+                        app_url=ctx.app_url,
+                        browser_note=note,
+                    ),
+                ),
+                allowed_origins=[ctx.app_url] if ctx.app_url else [],
+            )
         runs.insert(0, run_from_outcome(task, "qa", outcome, started))
         assessment = outcome.output
+        browser_calls = [c for c in ctx.mcp_calls if str(c.get("tool", "")).startswith("browser_")]
+        browser_ok = any(c.get("status") == "ok" for c in browser_calls)
+        screenshots = [a for c in browser_calls for a in c.get("artifacts", [])]
+        if browser_ids and not browser_calls and note is None:
+            note = (
+                "no Playwright MCP tools were available to the QA agent "
+                "(enable the Playwright preset for this project under Extensibility)"
+            )
 
         test_runs = [c for c in checks.runs if c.kind == "test"]
         tests_passed = bool(test_runs) and all(c.passed for c in test_runs)
@@ -378,6 +494,16 @@ class VerificationStages:
                     }
                 )
                 downgraded.append(ac.id)
+            if ac.id in browser_ids:
+                if result_ac.status == "PASS" and not browser_ok:
+                    result_ac = result_ac.model_copy(
+                        update={
+                            "status": "UNCERTAIN",
+                            "evidence": f"{result_ac.evidence} [downgraded: no browser evidence]",
+                        }
+                    )
+                    downgraded.append(ac.id)
+                result_ac = result_ac.model_copy(update={"artifacts": screenshots})
             criteria.append(result_ac)
 
         failed = [c for c in criteria if c.status == "FAIL"]
@@ -395,8 +521,13 @@ class VerificationStages:
             criteria=criteria,
             gaps=assessment.gaps,
             downgraded=downgraded,
+            browser_url=ctx.app_url,
+            browser_note=note,
+            browser_actions=len(browser_calls),
+            artifacts=screenshots,
         )
         result = TaskResult(
+            capability_manifest=manifest,
             summary=assessment.summary,
             verdict="fail" if blocking else ("uncertain" if uncertain else "pass"),
             blocking=blocking,
@@ -406,9 +537,12 @@ class VerificationStages:
             files_changed=files,
             risks=[
                 f"{c.id} uncertain: {c.evidence[:160]}" for c in criteria if c.status == "UNCERTAIN"
-            ],
+            ]
+            + ([f"browser verification unavailable: {note}"] if browser_ids and note else []),
         )
-        return self._output(task, result, runs, channel, checks.runs)
+        output = self._output(task, result, runs, channel, checks.runs)
+        output.events = events + output.events
+        return output
 
     # ---------------------------------------------------------------------- ci
 
@@ -435,8 +569,13 @@ class VerificationStages:
         if build.status != "SUCCESS":
             _, files = await self._change(wf)
             ctx = AgentRuntimeContext(
-                workflow_id=wf.workflow_id, task_id=task.task_id, repository_root=checkout.path
+                workflow_id=wf.workflow_id,
+                task_id=task.task_id,
+                repository_root=checkout.path,
+                knowledge=self.knowledge,
+                repository_id=self._repository_id(wf),
             )
+            history = await self._build_history(wf, build.log_tail)
             started = utcnow()
             outcome = await self.gateway.analyze_ci_failure(
                 ctx,
@@ -444,6 +583,7 @@ class VerificationStages:
                     build,
                     pipeline,
                     change_summary=f"{spec.summary}; files: {', '.join(files[:30])}",
+                    history=history,
                 ),
             )
             runs.append(run_from_outcome(task, "ci", outcome, started))
@@ -455,6 +595,15 @@ class VerificationStages:
                 f"ci build #{build.build_number} {build.status}"
                 + (f" in {analysis.failing_stage}: {analysis.summary}" if analysis else "")
             )
+        build_event = task_event(
+            task,
+            EventType.CI_BUILD_COMPLETED,
+            provider=build.provider,
+            job=build.job,
+            build_number=build.build_number,
+            result=build.status,
+            build_duration_ms=build.duration_ms,
+        )
         result = TaskResult(
             summary=f"{build.provider} build #{build.build_number}: {build.status}",
             verdict="fail" if blocking else "pass",
@@ -462,4 +611,23 @@ class VerificationStages:
             blocking_reasons=reasons,
             ci=CIReport(build=build, pipeline=pipeline, analysis=analysis),
         )
-        return self._output(task, result, runs, None)
+        output = self._output(task, result, runs, None)
+        output.events.insert(0, build_event)
+        return output
+
+    async def _build_history(self, wf: Workflow, log_tail: str) -> str:
+        """Earlier builds/failures of this project resembling the first error lines."""
+        if self.knowledge is None or not self.knowledge.available():
+            return ""
+        from forgeflow.knowledge.service import format_hits
+
+        lines = [
+            line
+            for line in log_tail.splitlines()
+            if any(w in line.lower() for w in ("error", "fail", "exception", "traceback"))
+        ]
+        query = "\n".join(lines[:5]) or log_tail[-500:]
+        hits = await self.knowledge.similar_failures(
+            query, self._repository_id(wf), exclude_workflow=wf.workflow_id
+        )
+        return format_hits(hits, max_chars=400) if hits else ""

@@ -1,7 +1,7 @@
 """QA tools: read the code, run the repository's allowlisted checks, ask the Developer (A2A).
 
-Browser verification through Playwright MCP is a later phase (spec section 28);
-until then browser-only criteria are reported as UNCERTAIN.
+Browser tools are not listed here: Playwright MCP tools reach the QA agent through
+the Extensibility Gateway when a project enables them (spec sections 28, 266A).
 """
 
 from __future__ import annotations

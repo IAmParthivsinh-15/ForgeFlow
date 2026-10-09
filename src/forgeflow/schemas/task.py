@@ -34,7 +34,7 @@ class TaskStatus(StrEnum):
 
 
 TaskKind = Literal[
-    "decompose", "implement", "integrate", "repair", "review", "security", "qa", "ci"
+    "decompose", "implement", "integrate", "repair", "review", "security", "qa", "ci", "publish"
 ]
 VERIFICATION_KINDS: frozenset[str] = frozenset({"review", "security", "qa", "ci"})
 DEVELOPMENT_KINDS: frozenset[str] = frozenset({"decompose", "implement", "integrate", "repair"})
@@ -74,6 +74,8 @@ class TaskResult(BaseModel):
     qa: QAReport | None = None
     ci: CIReport | None = None
     a2a_messages: int = 0
+    pull_request: dict | None = None
+    capability_manifest: str | None = Field(default=None, description="manifest hash used")
 
 
 class Task(BaseModel):

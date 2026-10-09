@@ -21,6 +21,8 @@ Verification = Literal[
     "api_test",
     "e2e_test",
     "smoke_test",
+    # Verified in a real browser by the QA agent through Playwright MCP (spec section 156).
+    "browser_test",
     "manual_review",
     "code_review",
     "security_scan",

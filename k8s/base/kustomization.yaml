@@ -1,0 +1,42 @@
+# ForgeFlow application layer (spec sections 107, 110-112). Data services and environment
+# specifics come from an overlay: overlays/local (minikube, in-cluster MongoDB) or
+# overlays/atlas (MongoDB Atlas). Render with: kubectl kustomize k8s/overlays/local
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: forgeflow
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: forgeflow
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - storage.yaml
+  - platform-api.yaml
+  - orchestrator-worker.yaml
+  - agent-worker.yaml
+  - frontend.yaml
+  - playwright-mcp.yaml
+  - hpa.yaml
+  - networkpolicy.yaml
+configMapGenerator:
+  - name: forgeflow-config
+    literals:
+      - FORGEFLOW_ENV=production
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - REPOS_ROOT=/repos
+      - WORKSPACES_ROOT=/workspaces
+      - ARTIFACTS_ROOT=/artifacts
+      - JENKINS_REPOS_ROOT=/repos
+      - FAKE_LLM=false
+      - METRICS_PORT=9101
+      - PREVIEW_PEER_HOST=playwright-mcp
+      - PREVIEW_PORTS=4173-4175
+images:
+  - name: forgeflow/python
+    newTag: dev
+  - name: forgeflow/frontend
+    newTag: dev

@@ -78,7 +78,9 @@ async def test_executor_falls_back_and_records_attempts(monkeypatch):
     }
     calls = []
 
-    async def fake_run_once(self, resolved, build_agent, input_text, output_type, context):
+    async def fake_run_once(
+        self, resolved, build_agent, input_text, output_type, context, usage=None
+    ):
         calls.append(resolved.provider)
         if resolved.provider == "nvidia":
             raise _api_error()

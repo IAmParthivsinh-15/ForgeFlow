@@ -15,6 +15,8 @@ export type WorkflowStatus =
   | "COMPLETED"
   | "FAILED"
   | "PAUSED"
+  | "WAITING_FOR_APPROVAL"
+  | "PUBLISHING"
   | "CANCELLED";
 
 export interface IntakeAssessment {
@@ -139,6 +141,7 @@ export interface CriterionResult {
   status: "PASS" | "FAIL" | "UNCERTAIN";
   evidence: string;
   checks: string[];
+  artifacts?: string[];
 }
 
 export interface QAReport {
@@ -146,6 +149,10 @@ export interface QAReport {
   criteria: CriterionResult[];
   gaps: string[];
   downgraded: string[];
+  browser_url?: string | null;
+  browser_note?: string | null;
+  browser_actions?: number;
+  artifacts?: string[];
 }
 
 export interface CIReport {
@@ -182,6 +189,7 @@ export interface FinalReport {
   branch: string | null;
   commit: string | null;
   ci_build_url: string | null;
+  pull_request_url: string | null;
   pr_title: string;
   pr_body: string;
   generated_at: string;
@@ -225,7 +233,7 @@ export interface Task {
   task_id: string;
   key: string;
   title: string;
-  kind: "decompose" | "implement" | "integrate" | "repair" | "review" | "security" | "qa" | "ci";
+  kind: "decompose" | "implement" | "integrate" | "repair" | "review" | "security" | "qa" | "ci" | "publish";
   agent_type: string;
   instructions: string;
   status: TaskStatus;
@@ -253,8 +261,12 @@ export interface Workflow {
   requirement_version: number;
   clarification_round: number;
   route_plan: RoutePlan | null;
+  project_id: string | null;
+  pull_request: { repository: string; number: number; url: string; branch: string; base: string } | null;
   execution: ExecutionInfo | null;
   report: FinalReport | null;
+  trace_id?: string | null;
+  autonomous?: boolean;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -351,7 +363,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },

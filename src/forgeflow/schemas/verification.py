@@ -147,6 +147,9 @@ class CriterionResult(BaseModel):
     status: Literal["PASS", "FAIL", "UNCERTAIN"]
     evidence: str
     checks: list[str] = Field(default_factory=list, description="Commands that provide evidence.")
+    artifacts: list[str] = Field(
+        default_factory=list, description="Evidence artifact ids (e.g. browser screenshots)."
+    )
 
 
 class QAAssessment(BaseModel):
@@ -162,6 +165,11 @@ class QAReport(BaseModel):
     downgraded: list[str] = Field(
         default_factory=list, description="Criteria ForgeFlow downgraded for lack of evidence."
     )
+    # Browser verification (Playwright MCP): where the app was served and what happened.
+    browser_url: str | None = None
+    browser_note: str | None = None
+    browser_actions: int = 0
+    artifacts: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------- CI
@@ -249,6 +257,7 @@ class FinalReport(BaseModel):
     branch: str | None = None
     commit: str | None = None
     ci_build_url: str | None = None
+    pull_request_url: str | None = None
     pr_title: str = ""
     pr_body: str = ""
     generated_at: datetime

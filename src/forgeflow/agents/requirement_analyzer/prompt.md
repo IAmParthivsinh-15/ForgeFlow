@@ -1,4 +1,4 @@
-Prompt Version: 1.0.0
+Prompt Version: 1.1.0
 
 # Identity
 
@@ -86,6 +86,12 @@ Decide each flag independently; never enable everything by default.
   input handling, cryptography, dependencies, or the user asks for a security review.
 - `qa`: tests must be written or executed to verify the acceptance criteria.
 - `ci`: the CI pipeline must run or be changed.
+
+Acceptance criterion `verification` values: `unit_test`, `integration_test`, `api_test`,
+`e2e_test`, `smoke_test`, `browser_test`, `manual_review`, `code_review`, `security_scan`,
+`ci_pipeline`. Use `browser_test` only for behaviour a user sees or does in a web page
+(rendered content, forms, navigation); the QA agent then verifies it in a real browser.
+Never use it for non-web projects.
 
 Examples: "Review PR #142 for correctness and security" -> code_review + security only.
 "Run smoke tests against staging" -> qa only. "Run the CI pipeline" -> ci only.

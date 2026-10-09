@@ -7,6 +7,8 @@
   changes state.
 - Reaper: re-dispatches lost dispatches, fails tasks whose worker stopped
   heart-beating, and wakes up due retries.
+- Telemetry: Prometheus metrics from relayed events (port METRICS_PORT), gauges,
+  and knowledge indexing (telemetry.py).
 
 Delivery is at-least-once: offsets are committed after handling; duplicates are
 absorbed by Redis de-duplication plus idempotent state checks.
@@ -23,8 +25,11 @@ import signal
 from aiokafka import AIOKafkaConsumer
 
 from forgeflow.apps.container import Container, build_container, load_environment
+from forgeflow.apps.worker.autonomy_loop import supervise
+from forgeflow.apps.worker.telemetry import gauges, index_knowledge
 from forgeflow.core.config import get_settings
 from forgeflow.core.logging import bind_context, clear_context, configure_logging, log_event
+from forgeflow.observability import metrics
 from forgeflow.platform.events.coordination import Coordinator
 from forgeflow.platform.events.kafka import OutboxRelay, deserialize, ensure_topics
 from forgeflow.schemas.events import Event, EventType, Topics
@@ -40,6 +45,9 @@ TICK_ON = frozenset(
         EventType.TASK_FAILED,
         EventType.TASK_CANCELLED,
         EventType.TASK_RETRYING,
+        # The workflow shows WAITING_FOR_APPROVAL while a capability waits for a human.
+        EventType.APPROVAL_REQUESTED,
+        EventType.APPROVAL_RESOLVED,
     }
 )
 
@@ -131,16 +139,27 @@ async def main() -> None:
     settings = get_settings()
     configure_logging("orchestrator-worker", settings.log_level)
     await ensure_topics(settings.kafka_bootstrap_servers)
-    container = await build_container(settings)
+    container = await build_container(settings, "orchestrator-worker")
+    metrics.serve(settings.metrics_port)
     relay = OutboxRelay(
-        container.store, settings.kafka_bootstrap_servers, settings.outbox_poll_interval_seconds
+        container.store,
+        settings.kafka_bootstrap_servers,
+        settings.outbox_poll_interval_seconds,
+        observer=metrics.observe_event,
     )
     await relay.start()
     stop = asyncio.Event()
     install_signal_handlers(stop)
     log_event(logger, "worker started", fake_llm=settings.fake_llm)
     try:
-        await asyncio.gather(relay.run(stop), consume(container, stop), reap(container, stop))
+        await asyncio.gather(
+            relay.run(stop),
+            consume(container, stop),
+            reap(container, stop),
+            gauges(container, stop),
+            index_knowledge(container, stop),
+            supervise(container, stop),
+        )
     finally:
         await relay.stop()
         await container.close()

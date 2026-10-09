@@ -24,6 +24,11 @@ repos/*
 !repos/README.md
 workspaces/*
 !workspaces/README.md
+# Evidence files (browser screenshots); metadata lives in MongoDB
+artifacts/*
+!artifacts/README.md
+# Kubernetes secrets generated from your local values (see k8s/README.md)
+k8s/**/secrets.env
 
 # OS / editors
 .DS_Store
@@ -33,3 +38,6 @@ Thumbs.db
 
 # Specification is kept locally, outside the repository
 Implementation_v1.md
+
+# L4 autonomy plan, kept locally like the specification
+additional.md

@@ -1,9 +1,175 @@
 @import "tailwindcss";
 
-:root {
-  color-scheme: light dark;
+/*
+ * ForgeFlow "Obsidian" theme: black UI, DM Sans body, Space Grotesk headings,
+ * JetBrains Mono for labels, ids, navigation and data.
+ *
+ * The Tailwind palette is remapped here, so every component's existing slate / sky /
+ * emerald / amber classes take the theme's colours without per-component changes.
+ * Dark mode is always on (class="dark" on <html>).
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "DM Sans", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* neutrals: page -> surface -> raised -> borders -> muted -> text */
+  --color-slate-950: #0d0f14;
+  --color-slate-900: #161921;
+  --color-slate-800: #252a35;
+  --color-slate-700: #333a48;
+  --color-slate-600: #565e70;
+  --color-slate-500: #8b93a5;
+  --color-slate-400: #a4abbb;
+  --color-slate-300: #c3c9d5;
+  --color-slate-200: #dde1e8;
+  --color-slate-100: #f1f3f6;
+  --color-slate-50: #f7f8fa;
+
+  /* accent (running, links, primary actions) */
+  --color-sky-300: #9bbefa;
+  --color-sky-400: #6fa2f8;
+  --color-sky-500: #4f8ff7;
+  --color-sky-600: #3a78e6;
+  --color-sky-950: #0f1d36;
+
+  /* positive (verified / passed) */
+  --color-emerald-300: #6fdcb3;
+  --color-emerald-400: #3fcf9c;
+  --color-emerald-500: #24b886;
+  --color-emerald-600: #1a9a70;
+  --color-emerald-700: #3fcf9c;
+  --color-emerald-800: #6fdcb3;
+  --color-emerald-900: #0f3b2d;
+  --color-emerald-950: #0c241d;
+
+  /* attention (pending / uncertain) */
+  --color-amber-300: #edc770;
+  --color-amber-400: #e2b54a;
+  --color-amber-700: #e2b54a;
+  --color-amber-800: #edc770;
+  --color-amber-900: #edc770;
+  --color-amber-950: #2a2111;
+
+  /* destructive (failed / blocking) */
+  --color-rose-300: #f6a3ad;
+  --color-rose-400: #f07c8a;
+  --color-rose-600: #e45b6c;
+  --color-rose-700: #f07c8a;
+  --color-rose-800: #f6a3ad;
+  --color-rose-900: #4a1c24;
+  --color-rose-950: #2a1218;
+
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+  --radius-2xl: 6px;
 }
 
-body {
-  @apply bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+:root {
+  color-scheme: dark;
+  --ff-accent: #4f8ff7;
+  --ff-accent-hover: #6fa2f8;
+  --ff-border: #252a35;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+
+  body {
+    font-family: var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: rgb(79 143 247 / 0.35);
+  }
+
+  * {
+    scrollbar-color: #333a48 transparent;
+    scrollbar-width: thin;
+  }
+
+  input,
+  select,
+  textarea {
+    color-scheme: dark;
+  }
+}
+
+/* Small uppercase mono caption: "WORKFLOW · STAGE 02 OF 04" */
+@utility ff-label {
+  @apply font-mono text-[11px] font-normal tracking-[0.06em] text-slate-500 uppercase;
+}
+
+@utility ff-card {
+  @apply rounded-[6px] border border-slate-800 bg-slate-900;
+}
+
+@utility ff-pill {
+  @apply inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium whitespace-nowrap;
+}
+
+@utility ff-pill-blue {
+  @apply ff-pill border-sky-500/40 bg-sky-500/10 text-sky-400;
+}
+
+@utility ff-pill-green {
+  @apply ff-pill border-emerald-400/40 bg-emerald-400/10 text-emerald-400;
+}
+
+@utility ff-pill-amber {
+  @apply ff-pill border-amber-400/40 bg-amber-400/10 text-amber-400;
+}
+
+@utility ff-pill-red {
+  @apply ff-pill border-rose-400/40 bg-rose-400/10 text-rose-400;
+}
+
+@utility ff-pill-gray {
+  @apply ff-pill border-slate-700 bg-slate-800/60 text-slate-400;
+}
+
+@utility ff-btn {
+  @apply inline-flex items-center gap-1.5 rounded-[4px] border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40;
+}
+
+@utility ff-btn-primary {
+  @apply inline-flex items-center gap-1.5 rounded-[4px] bg-[var(--ff-accent)] px-3.5 py-1.5 text-sm font-medium text-white hover:bg-[var(--ff-accent-hover)] disabled:opacity-40;
+}
+
+@utility ff-btn-danger {
+  @apply inline-flex items-center gap-1.5 rounded-[4px] border border-rose-400/40 bg-rose-400/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-400/20 disabled:opacity-40;
+}
+
+@utility ff-input {
+  @apply w-full rounded-[4px] border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/25;
+}
+
+@utility ff-tab {
+  @apply -mb-px border-b-2 border-transparent px-3 py-2 font-mono text-[13px] font-medium text-slate-500 hover:text-slate-200;
+}
+
+@utility ff-tab-active {
+  @apply border-sky-500 text-sky-400 hover:text-sky-400;
+}
+
+/* React Flow in the theme */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-controls-button-background-color: #161921;
+  --xy-controls-button-background-color-hover: #252a35;
+  --xy-controls-button-color: #c3c9d5;
+  --xy-controls-button-border-color: #252a35;
+  --xy-edge-stroke: #565e70;
 }

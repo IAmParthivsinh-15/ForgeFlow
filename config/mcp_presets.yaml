@@ -1,0 +1,36 @@
+# MCP server presets (spec sections 207, 266A).
+#
+# A preset is a reviewed, one-click MCP registration: transport, URL and per-tool
+# policies chosen by the ForgeFlow admin. Users can still change tool policies later
+# under Extensibility -> MCP servers.
+#
+#   tool_policies   tool name -> auto | ask | deny ("deny" also disables the tool).
+#                   Tools not listed get default_policy.
+#   url_guard       tool name -> argument holding a URL. Such calls may only open the
+#                   app under test (plus the project's extra browser origins).
+#   skill           built-in skill (config/skills/<slug>) installed for allowed_agents
+#                   when the preset is enabled for a project.
+
+presets:
+  playwright:
+    name: playwright
+    description: >-
+      Microsoft Playwright MCP in its own container (docker compose --profile browser).
+      The QA agent drives Chromium through it to verify browser_test criteria.
+    transport: streamable_http
+    url: http://playwright-mcp:8931/mcp
+    allowed_agents: [qa]
+    skill: playwright-mcp
+    # Playwright marks every interaction as destructive. Here they only change an
+    # isolated, in-memory browser on a network without internet access, pointed at the
+    # app under test, so they run without asking.
+    default_policy: auto
+    sandboxed: true                   # destructive annotations -> write (see above)
+    tool_policies:
+      browser_run_code_unsafe: deny   # arbitrary Playwright code: forbidden (spec section 28)
+      browser_evaluate: deny          # arbitrary JavaScript in the page
+      browser_file_upload: deny       # reads files from the browser container
+      browser_drop: deny              # same, via drag and drop
+    url_guard:
+      browser_navigate: url
+      browser_tabs: url

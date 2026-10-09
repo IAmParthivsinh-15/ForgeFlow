@@ -1,0 +1,31 @@
+# Argo CD Application for ForgeFlow (spec sections 108, 158).
+#
+# Sync is manual on purpose: ForgeFlow never changes what runs without approval
+# (deployment.sync / deployment.rollback are ASK capabilities), and Argo CD only allows
+# rollbacks while automated sync is off. Jenkins updates the image tags in git; a person
+# (or an approved ForgeFlow sync) applies them.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forgeflow
+  namespace: argocd
+spec:
+  project: forgeflow
+  source:
+    repoURL: https://github.com/IAmParthivsinh-15/ForgeFlow.git
+    targetRevision: main
+    path: k8s/overlays/gitops
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: forgeflow
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=false
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
+  revisionHistoryLimit: 10

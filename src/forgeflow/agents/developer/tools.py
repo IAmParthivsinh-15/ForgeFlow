@@ -9,7 +9,8 @@ from __future__ import annotations
 from agents import FunctionTool
 
 from forgeflow.tools.filesystem.agent_tools import READ_TOOLS
+from forgeflow.tools.knowledge_tools import KNOWLEDGE_TOOLS
 
 
 def get_tools() -> list[FunctionTool]:
-    return list(READ_TOOLS)
+    return [*READ_TOOLS, *KNOWLEDGE_TOOLS]

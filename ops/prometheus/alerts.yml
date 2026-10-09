@@ -1,0 +1,40 @@
+# Alert rules for the named L4 conditions (additional.md section 9). Thresholds are
+# examples to tune per deployment; an SLO is not claimed until measured on real runs.
+groups:
+  - name: forgeflow-l4
+    rules:
+      - alert: ForgeFlowEscalation
+        expr: increase(forgeflow_l4_escalations_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Run escalated ({{ $labels.condition }}): a human decision is needed"
+      - alert: ForgeFlowEmergencyStop
+        expr: increase(forgeflow_l4_emergency_stops_total[10m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "An emergency stop was activated" }
+      - alert: ForgeFlowCircuitBreaker
+        expr: increase(forgeflow_l4_circuit_breaker_trips_total[10m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "Circuit breaker {{ $labels.breaker }} tripped" }
+      - alert: ForgeFlowClosureMismatch
+        expr: increase(forgeflow_l4_closure_mismatches_total[30m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "Closure check {{ $labels.check }} failed against the source of truth" }
+      - alert: ForgeFlowBacklog
+        expr: sum(forgeflow_l4_active_runs{status="RECEIVED"}) > 10
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Work items are queuing up (RECEIVED > 10 for 15m)" }
+      - alert: ForgeFlowRunStuck
+        expr: increase(forgeflow_l4_alerts_total{kind="run_stuck"}[30m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "A run exceeded its time budget" }
+      - alert: ForgeFlowSourceFailures
+        expr: increase(forgeflow_l4_alerts_total{kind="source_failure"}[30m]) > 2
+        labels: { severity: warning }
+        annotations: { summary: "Repeated failures reading the work source (GitHub)" }
+      - alert: ForgeFlowWorkerCrashRate
+        expr: sum(rate(forgeflow_tasks_total{status="failed"}[15m])) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Abnormal task failure rate" }

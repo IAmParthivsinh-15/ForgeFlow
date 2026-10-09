@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.core.config import Settings
@@ -55,15 +56,24 @@ class WorkflowService:
         gateway: AgentGateway,
         repositories: RepositoryResolver,
         settings: Settings,
+        extensibility: Any = None,
     ) -> None:
         self.store = store
         self.gateway = gateway
         self.repositories = repositories
         self.settings = settings
+        self.extensibility = extensibility
 
     # ------------------------------------------------------------------ create
 
-    async def create_workflow(self, request: str, repository_path: str | None) -> Workflow:
+    async def create_workflow(
+        self,
+        request: str,
+        repository_path: str | None,
+        *,
+        trace_id: str | None = None,
+    ) -> Workflow:
+        """`trace_id` marks an autonomous (L4) workflow owned by a commander run."""
         request = request.strip()
         if not request:
             raise ValidationFailed("request must not be empty")
@@ -72,11 +82,18 @@ class WorkflowService:
         repo = self.repositories.validate(repository_path) if repository_path else None
 
         now = utcnow()
+        project_id = None
+        if repo and self.extensibility is not None:
+            project = await self.extensibility.projects.ensure(self.settings.local_user_id, repo)
+            project_id = project.project_id
         wf = Workflow(
             workflow_id=new_id("wf"),
             request=request,
             repository_path=repo,
+            project_id=project_id,
             status=WorkflowStatus.CREATED,
+            trace_id=trace_id,
+            autonomous=trace_id is not None,
             created_at=now,
             updated_at=now,
         )
@@ -139,20 +156,22 @@ class WorkflowService:
             current_agent = "requirement_analyzer"
             questions = await self.store.list_questions(workflow_id)
             answered = [q for q in questions if q.status == QuestionStatus.ANSWERED]
-            must_finalize = wf.clarification_round >= self.settings.max_clarification_rounds
-            started = utcnow()
-            analysis = await self.gateway.analyze_requirements(
-                ctx,
-                AnalysisRequest(
-                    request=wf.request,
-                    intake=wf.intake,
-                    repository_attached=wf.repository_path is not None,
-                    previous_specification=await self.store.get_specification(workflow_id),
-                    answered_questions=answered,
-                    must_finalize=must_finalize,
-                    max_questions=self.settings.max_questions_per_round,
-                ),
+            # Autonomous runs never wait for a person to answer: uncertainty becomes
+            # recorded assumptions, and out-of-scope risk is escalated by the commander.
+            must_finalize = (
+                wf.autonomous or wf.clarification_round >= self.settings.max_clarification_rounds
             )
+            started = utcnow()
+            request = AnalysisRequest(
+                request=wf.request,
+                intake=wf.intake,
+                repository_attached=wf.repository_path is not None,
+                previous_specification=await self.store.get_specification(workflow_id),
+                answered_questions=answered,
+                must_finalize=must_finalize,
+                max_questions=self.settings.max_questions_per_round,
+            )
+            analysis = await self._analyze_with_skills(wf, ctx, request)
             runs.append(self._run_record(wf, "requirement_analyzer", analysis, started))
         except AllProvidersFailed as exc:
             runs.append(self._failed_run(wf, current_agent, str(exc), exc.attempts))
@@ -217,6 +236,24 @@ class WorkflowService:
                 events=events,
             )
         )
+
+    async def _analyze_with_skills(self, wf: Workflow, ctx, request: AnalysisRequest):
+        """The Requirement Analyzer sees enabled skills at METADATA level (spec section 230)."""
+        ext = self.extensibility
+        project = await ext.projects.find_for_repository(wf.repository_path) if ext else None
+        if project is None:
+            return await self.gateway.analyze_requirements(ctx, request)
+        async with ext.runtime.for_agent(
+            owner_id=project.owner_id,
+            workflow_id=wf.workflow_id,
+            task_id=None,
+            project=project,
+            agent="requirement_analyzer",
+            context=wf.request,
+        ) as caps:
+            ctx.skills_prompt = caps.prompt
+            ctx.extra_tools = caps.tools
+            return await self.gateway.analyze_requirements(ctx, request)
 
     def _build_specification(
         self,
@@ -384,7 +421,11 @@ class WorkflowService:
         wf.updated_at = utcnow()
         events.append(
             self._event(
-                wf, EventType.WORKFLOW_STATUS_CHANGED, previous=str(previous), current=str(target)
+                wf,
+                EventType.WORKFLOW_STATUS_CHANGED,
+                previous=str(previous),
+                current=str(target),
+                age_seconds=round((wf.updated_at - wf.created_at).total_seconds(), 3),
             )
         )
 

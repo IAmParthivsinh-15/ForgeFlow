@@ -3,9 +3,12 @@
 Autonomous software-engineering control plane, built from the ForgeFlow V1 specification
 (`Implementation_v1.md`, kept outside this repository). Section numbers (§) below refer to it.
 
-**Current status: Phase 0 + Milestones 1–3: requirement-first orchestration, development
-with parallel worktrees, and verification (code review, OWASP security, QA, Jenkins CI) with a
-bounded repair loop, A2A, and a final report.**
+**Current status: spec phases 0–44 + the L4 autonomy layer (`additional.md`):
+requirement-first orchestration, parallel worktrees, verification (review, OWASP security, QA,
+Jenkins CI) with a bounded repair loop and A2A, the extensibility gateway (GitHub, MCP, skills,
+approvals, audit), searchable engineering history (Elasticsearch), Prometheus/Grafana/Langfuse,
+Kubernetes + Argo CD manifests, browser QA through Playwright MCP, and an L4 commander that
+processes labelled GitHub issues end to end under a versioned decision contract.**
 
 ```text
 User request
@@ -27,7 +30,9 @@ User request
   → Blockers? → repair task (Developer) → next round re-runs the failed stages, everything
                 after them, and review. At most MAX_REPAIR_ATTEMPTS, then a human decides
                 (accept the risks, or allow one more repair).
-  → Final report + ready-to-paste PR title/description → Workflow = COMPLETED
+  → Final report + PR title/description
+  → GitHub bound to the project? push forgeflow/<workflow> and open the PR
+      (asks for your approval first: WAITING_FOR_APPROVAL)  → Workflow = COMPLETED
 ```
 
 Requests that need no code (e.g. "Review PR #142", "Check this app against OWASP Top 10",
@@ -129,7 +134,115 @@ least one commit (a plain folder is analysed but not developed).
   missing reports `unavailable`, and the affected OWASP categories become `uncertain`, never
   `pass`.
 
-## 4. Local development (without containers for the app)
+## 4. Extensibility: GitHub, MCP servers, skills
+
+Open **Extensibility** in the UI (or use the API, see below).
+
+**Before anything else**, set a secret key in `.env`. It encrypts every connector and MCP
+credential; only ciphertext is stored, and API responses never return credentials.
+
+```bash
+uv run python -m forgeflow.scripts.generate_secret_key   # paste into FORGEFLOW_SECRET_KEY
+```
+
+| What | How |
+|---|---|
+| **GitHub** | *Connectors → Connect GitHub*: a fine-grained personal access token limited to your repositories, with **Contents: Read and write** and **Pull requests: Read and write**. Then *Projects → (your repo) → GitHub*: pick the connector and `owner/repo` (detected from `origin` when possible). When verification passes, ForgeFlow pushes `forgeflow/<workflow>` and opens a PR — after you approve it. It never pushes to your own branches and never merges. |
+| **MCP servers** | *MCP servers → Add*: Streamable HTTP / SSE by URL (token sent as a header, never in the URL), or a **stdio** server chosen from [config/mcp_stdio_allowlist.yaml](config/mcp_stdio_allowlist.yaml) (Playwright, the MCP reference server). Users cannot supply their own commands. Tools are discovered and classified read / write / destructive; read tools run automatically, write tools ask, destructive tools are denied unless you set a per-tool policy. Enable a server per project and per agent. |
+| **Skills** | *Skills → Create* or *Upload .zip* (`skill.md` + `metadata.json`, optional `references/`, `examples/`, `assets/` — Markdown/JSON/YAML/text only, 2 MB max). Content is checked for secrets, hidden characters, instruction-override and exfiltration wording, and undeclared URLs (stricter when publishing). Versions are immutable; enabling pins a version (roll back by enabling an older one). Skills can be private or public; others can use or fork public skills but not edit them. |
+| **Approvals** | Anything with an `ask` policy (e.g. opening a PR, MCP write tools) waits for you on the workflow page and under *Approvals* (default timeout 30 minutes). Rejecting is a normal outcome — the workflow completes without that action. |
+| **Audit** | *Audit log* lists every capability use: agent, capability, approval decision, result, latency, skill versions injected. |
+
+How agents receive capabilities: at execution start ForgeFlow resolves, per agent, the skills
+and tools the project enables and policy allows, and saves that **capability snapshot** on the
+workflow (pinned skill versions, MCP configuration hashes, connector scopes). Skills are added
+to the agent's instructions as clearly-delimited guidance (metadata only for the Requirement
+Analyzer; full text for relevant skills within a budget; summaries otherwise). MCP tools are
+never handed to agents directly: each becomes a proxy whose every call goes through policy,
+approval, revocation check and audit. Revoking a connector or MCP server blocks further calls
+immediately. *Projects → What an agent receives here* previews any agent's manifest.
+
+### MongoDB Atlas
+
+1. In Atlas, create a database user and allow your IP (*Network Access*).
+2. In `.env` set both (the first is used by the containers, the second by processes on the host):
+   ```env
+   MONGODB_URI_CONTAINERS=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+   MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+   ```
+3. `docker compose --profile ci up -d --build`. (The local `mongodb` container still starts but
+   is unused; transactions work on Atlas, including the free tier.)
+
+The free tier has 512 MB. Published events expire after `EVENT_RETENTION_DAYS` (30) and audit
+records after `AUDIT_RETENTION_DAYS` (90); events still waiting to be published never expire.
+
+## 5. Search, monitoring, browser QA, deployments (spec §40–44)
+
+Each is an optional docker compose profile; ForgeFlow keeps working when a profile is off.
+
+| Profile | What it adds | Where |
+|---|---|---|
+| `search` | Elasticsearch: past failures, CI builds, test runs, review/security findings, agent runs and the code of each project, indexed by the orchestrator worker. Repair and CI-diagnosis agents receive similar earlier failures *and how they were fixed*; the Developer agents get `search_engineering_history` and `search_repository_index`. Keyword (BM25) search works offline; set `EMBEDDING_*` for hybrid semantic search. | UI *Knowledge* |
+| `observability` | Prometheus (spec §67 metrics, from the event stream + API latency, Kafka lag, Redis latency, worktrees) and Grafana with 7 provisioned dashboards (`ops/grafana/generate_dashboards.py`). Langfuse Cloud tracing turns on when `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set; prompt/response text is exported only with `TRACE_INCLUDE_CONTENT=true`. | http://localhost:9090, http://localhost:3000 |
+| `browser` | Microsoft Playwright MCP in its own container on an internal network (no internet). A `browser_test` acceptance criterion makes ForgeFlow serve the commit under test (static files, or the `preview:` command in `forgeflow.yaml`) and the QA agent verifies it in Chromium through MCP tools - no hand-written scripts. Screenshots are stored as evidence. Enable per project: *Projects → Browser QA*. | UI QA report |
+
+```bash
+docker compose --profile ci --profile search --profile observability --profile browser up -d --build
+```
+
+**Kubernetes and Argo CD:** see [k8s/README.md](k8s/README.md) - Kustomize base + `local`
+(minikube) / `atlas` / `gitops` overlays, default-deny NetworkPolicies, HPAs, and an Argo CD
+Application with manual sync. Connect Argo CD under *Connectors*, bind an application to a
+project, then *Verify deployment*: Argo CD status + health URL + smoke paths; an unhealthy
+deployment offers a rollback that waits for your approval. The `Jenkinsfile` is ForgeFlow's own
+CI (lint, types, tests, images, optional GitOps tag bump).
+
+## 6. Autonomy (L4): GitHub issues end to end
+
+ForgeFlow owns one bounded outcome, defined once in
+[config/autonomy/contract.yaml](config/autonomy/contract.yaml): *process eligible low-risk bug
+issues labelled `forgeflow` in one repository, resolve them as a verified draft PR linked on the
+issue, and escalate anything else with evidence*.
+
+```text
+issue labelled forgeflow+bug ──webhook──┐
+scheduled sweep (backup) ───────────────┴─► one idempotent run per issue (trace_id)
+  → re-read GitHub, eligibility        → CLOSE_NO_ACTION (with evidence) | continue
+  → Prepare: requirement analysis      → out of scope / high risk → ESCALATE
+  → task_plan.json validated in code   (worker cap, model allow-list, reviewer ≠ implementer,
+                                        AUTO-only actions, budgets) and SAVED - no plan, no workers
+  → Do: parallel worktrees (≥2 when separable)   Review: a different model   QA, security, CI
+  → draft PR (AUTO) + resolution comment → closure re-reads GitHub → RESOLVED | ESCALATED
+```
+
+| Guarantee | How it is enforced |
+|---|---|
+| Plan before workers | `start_guard`/`spawn_guard` in the scheduler refuse execution and every dispatch without a validated, saved plan |
+| Authority tiers | the action profile (AUTO / ASK / DENY) is applied by the capability gateway on every external call; anything unlisted asks |
+| Immutable limits | budgets, worker cap, models and profile are snapshotted on the run at intake |
+| Circuit breakers | tokens, cost, runtime, retries, failed tasks, provider failures, tool errors → `PAUSED_BY_GUARDRAIL` + alert |
+| Independent review | closure fails unless the review ran on a different model than every implementer run |
+| Closure | PR head SHA = verified commit, draft, CI + tests passed, security passed, issue still open with the resolution comment - all re-read from GitHub |
+| Emergency stop | `forgeflow run stop <trace_id> --reason "..."` (or the run page): blocks spawns and external actions at once, halts workers, rejects pending approvals, checkpoints, idempotent; resume re-reads GitHub and avoids duplicate side effects |
+| Service identity, secrets | the contract's `source.connector_id` (machine user / GitHub App token); secrets in the encrypted store or Vault (`SECRET_BACKEND=vault`) |
+
+**Set it up (observe mode first, as the rollout plan requires):**
+
+1. Connect GitHub with the *service identity's* fine-grained token (*Connectors*).
+2. In `config/autonomy/contract.yaml` set `source.repository`, `source.project_repository_path`
+   (the folder under `repos/`) and `source.connector_id`. Keep `mode: observe`.
+3. Set `GITHUB_WEBHOOK_SECRET` in `.env` and add a GitHub webhook for *Issues* to
+   `https://<your host>/api/v1/autonomy/webhooks/github` (the sweep catches issues anyway).
+4. Label an issue `forgeflow` + `bug`. Watch *Autonomy* in the UI or the cockpit
+   (`ops/cockpit/cockpit.sh`, or `ops/cockpit/cockpit.ps1` on Windows).
+5. After repeated observe-mode runs look right, publish a new contract version with
+   `mode: autonomous`.
+
+The evidence portfolio of a run is `GET /api/v1/autonomy/runs/{trace_id}/portfolio`; the
+last-five-run review is `GET /api/v1/autonomy/review`. What is verified and what still needs real
+runs is tracked in [docs/L4_ACCEPTANCE.md](docs/L4_ACCEPTANCE.md).
+
+## 7. Local development (without containers for the app)
 
 Requirements: [uv](https://docs.astral.sh/uv/), Node 20+, Docker (for MongoDB/Redis/Kafka).
 
@@ -145,7 +258,7 @@ cd apps/frontend && npm install && npm run dev                      # terminal 4
 The `Makefile` wraps these (`make dev-api`, `make dev-worker`, `make dev-frontend`); on Windows
 without `make`, run the commands directly.
 
-## 5. Checks
+## 8. Checks
 
 ```bash
 uv run pytest                 # unit + API tests (in-memory store, fake agents; no infrastructure)
@@ -200,7 +313,23 @@ stopped heart-beating (spec §48). Scale agents with `docker compose up -d --sca
 | Repair loop, rounds, human decision | `src/forgeflow/platform/orchestration/execution.py` | §57 |
 | A2A channel | `src/forgeflow/platform/a2a/channel.py` | §186–188 |
 | Final report + PR text | `src/forgeflow/platform/orchestration/report.py` | §50, §58 |
-| Frontend | `apps/frontend/` | §63–65, §174 |
+| Extensibility gateway (facade) | `src/forgeflow/extensibility/facade.py` | §202 |
+| Secret store (encrypted credentials) | `src/forgeflow/extensibility/secrets.py` | §71, §204 |
+| Policy engine, approvals, capability gateway + audit | `src/forgeflow/extensibility/{policy,approvals,gateway}.py` | §29, §235–238 |
+| Connectors, projects | `src/forgeflow/extensibility/{connectors,projects}.py` | §204–206, §241, §254 |
+| GitHub plugin (API + safe push) | `src/forgeflow/integrations/github/client.py` | §58, §192 |
+| MCP gateway + per-run proxies | `src/forgeflow/extensibility/mcp/service.py`, `extensibility/runtime.py` | §207–211, §225, §246 |
+| Skills (validation, packages, registry, injection) | `src/forgeflow/extensibility/skills/` | §212–234, §251–253 |
+| Capability resolver, manifests, snapshot | `src/forgeflow/extensibility/resolver.py` | §223–224, §242–245 |
+| Knowledge: index, chunker, history, retrieval tools | `src/forgeflow/knowledge/`, `tools/knowledge_tools.py` | §36–37, §101 |
+| Metrics, tracing (Langfuse via OTLP) | `src/forgeflow/observability/`, `ops/prometheus`, `ops/grafana` | §67–69, §102 |
+| Browser QA: preview server, Playwright preset + skill | `src/forgeflow/tools/browser/`, `config/mcp_presets.yaml`, `config/skills/playwright-mcp/` | §28, §156, §266A |
+| Artifacts (evidence files) | `src/forgeflow/platform/artifacts.py` | §155 |
+| Argo CD plugin, deployment checks | `src/forgeflow/integrations/argocd/`, `src/forgeflow/platform/deployments.py` | §43, §157–158 |
+| Kubernetes, Argo CD manifests | `k8s/` | §107–112 |
+| L4 contract, runs, commander, guardrails, closure, stop/resume, learning | `config/autonomy/`, `src/forgeflow/autonomy/` | additional.md |
+| Operator CLI, cockpit | `src/forgeflow/cli.py`, `ops/cockpit/` | additional.md §5, §8 |
+| Frontend ("Obsidian" theme) | `apps/frontend/` | §63–65, §174 |
 
 ### Why the Python code is under `src/forgeflow/`
 
@@ -255,11 +384,23 @@ Nesting them under `forgeflow` keeps the spec's layout without those collisions.
 | GET | `/api/v1/workflows/{id}/report` (final report incl. PR title/body) |
 | POST | `/api/v1/workflows/{id}/decision` — `{action: "accept" \| "repair"}` when the repair limit is reached |
 | GET | `/api/v1/workflows/{id}/a2a` (recorded agent-to-agent exchanges) |
-| GET | `/api/v1/repositories`, `/health`, `/health/live` |
+| GET/POST | `/api/v1/connectors`, `/connectors/{id}` + `/test`, `/disable`, `/enable`, `/revoke`, `DELETE` |
+| GET/POST | `/api/v1/mcps`, `/mcps/allowlist`, `/mcps/{id}` + `/test`, `/refresh-tools`, `/disable`, `/enable`, `/revoke`, `DELETE`; `PATCH /mcps/{id}/tools/{name}` |
+| GET/POST | `/api/v1/skills?scope=&q=`, `/skills/upload`, `/skills/{id}` + `/versions`, `/publish`, `/fork`, `/enable`, `/disable`, `/status` |
+| GET/PATCH | `/api/v1/projects`, `/projects/{id}` (GitHub binding, MCP servers, capability policies) |
+| GET/POST | `/api/v1/approvals?status=&workflow_id=`, `/approvals/{id}/approve`, `/reject` |
+| GET | `/api/v1/capabilities`, `/capabilities/available?project_id=&agent=`, `/audit/capabilities`, `/workflows/{id}/capabilities` |
+| GET/POST | `/api/v1/knowledge/status`, `/knowledge/search?q=&kind=&project_id=`, `/knowledge/projects/{id}/index` |
+| GET | `/api/v1/workflows/{id}/artifacts`, `/api/v1/artifacts/{id}` |
+| GET/POST | `/api/v1/mcps/presets`, `/mcps/presets/{key}` |
+| POST/GET | `/api/v1/projects/{id}/deployments/verify`, `/deployments?project_id=`, `/deployments/{id}`, `/deployments/{id}/rollback` |
+| POST | `/api/v1/autonomy/webhooks/github` (HMAC), `/autonomy/intake`, `/autonomy/sweep` |
+| GET/POST | `/api/v1/autonomy/status`, `/contract`, `/runs`, `/runs/{trace}` + `/plan`, `/events`, `/portfolio`, `/stop`, `/resume`, `/rerun` |
+| GET/POST | `/api/v1/autonomy/alerts`, `/alerts/{id}/ack`, `/learning`, `/learning/{id}/candidates/{n}`, `/review?last=5` |
+| GET | `/api/v1/repositories`, `/health`, `/health/live`, `/metrics` |
 
-## Next phases (spec §198)
+## Next phases
 
-35–39: GitHub plugin (create the PR from the integration branch), plugin / connector / skill
-registries, MCP gateway. 40–44: Elasticsearch/RAG over past failures, Prometheus/Grafana/Langfuse,
-Kubernetes, Argo CD, and Playwright MCP for browser-based QA (browser-only acceptance criteria
-are reported UNCERTAIN until then).
+Spec §198 items 45–46 (evaluation suite, production hardening); real-run L4 evidence (see
+[docs/L4_ACCEPTANCE.md](docs/L4_ACCEPTANCE.md)); per-task Kubernetes Jobs; authentication and
+multi-user ownership (records already carry `owner_id`); OAuth connectors; Jira/Linear/Slack.

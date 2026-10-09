@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "name": "Playwright MCP browser verification",
+  "slug": "playwright-mcp",
+  "version": "1.0.0",
+  "description": "How the QA agent verifies acceptance criteria in a real browser through the Microsoft Playwright MCP tools: snapshots, element refs, interaction, evidence and when to stop.",
+  "when_to_use": "A browser_test acceptance criterion, or any check of what a user sees or does in a web page.",
+  "license": "Apache-2.0 (derived from the Playwright MCP documentation)",
+  "allowed_agents": ["qa"],
+  "tags": ["qa", "browser", "playwright", "mcp", "e2e"],
+  "endpoints": ["https://github.com/microsoft/playwright-mcp"],
+  "dependencies": {"skills": [], "mcp": ["playwright"], "connectors": []}
+}

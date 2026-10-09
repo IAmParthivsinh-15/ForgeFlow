@@ -20,6 +20,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from forgeflow.agents.context import AgentRuntimeContext
 from forgeflow.core.config import Settings
@@ -31,6 +32,10 @@ from forgeflow.core.errors import (
 )
 from forgeflow.core.ids import new_id, utcnow
 from forgeflow.core.logging import bind_context, clear_context, log_event
+from forgeflow.extensibility.catalog import github_capabilities
+from forgeflow.extensibility.gateway import CapabilityDenied, Invocation
+from forgeflow.extensibility.projects import project_id_for
+from forgeflow.integrations.github.client import push_branch
 from forgeflow.platform.ci.jenkins import CIProvider
 from forgeflow.platform.execution.common import (
     HandlerOutput,
@@ -39,6 +44,7 @@ from forgeflow.platform.execution.common import (
     check_event,
     run_from_outcome,
     run_record,
+    run_with_capabilities,
 )
 from forgeflow.platform.execution.verification import VerificationStages
 from forgeflow.platform.orchestration.execution import TaskChanges, task_event
@@ -88,13 +94,18 @@ class TaskExecutor:
         worker_id: str | None = None,
         ci: CIProvider | None = None,
         scanners: ScannerSuite | None = None,
+        extensibility: Any = None,
+        knowledge: Any = None,
+        artifacts: Any = None,
     ) -> None:
         self.store = store
+        self.knowledge = knowledge
         self.gateway = gateway
         self.worktrees = worktrees
         self.git = git
         self.settings = settings
         self.worker_id = worker_id or new_id("worker")
+        self.extensibility = extensibility
         self.verification = VerificationStages(
             store,
             gateway,
@@ -102,6 +113,9 @@ class TaskExecutor:
             git,
             settings,
             ci=ci,
+            extensibility=extensibility,
+            knowledge=knowledge,
+            artifacts=artifacts,
             scanners=scanners
             or ScannerSuite.default(settings.semgrep_rules_path, settings.scanner_timeout_seconds),
         )
@@ -250,6 +264,46 @@ class TaskExecutor:
 
     # ---------------------------------------------------------------- handlers
 
+    async def _capable(self, wf, task, agent, ctx, spec, call):
+        """Run an agent call with its resolved skills and MCP tools."""
+        context = " ".join(
+            [
+                spec.summary,
+                spec.goal,
+                *spec.scope.in_scope,
+                *(c.description for c in spec.checklist),
+                *(
+                    f"{ac.description} ({ac.verification.replace('_', ' ')})"
+                    for ac in spec.acceptance_criteria
+                ),
+                task.title,
+                task.instructions,
+                *task.file_scope,
+            ]
+        )
+        return await run_with_capabilities(
+            self.extensibility, self.settings.local_user_id, wf, task, agent, ctx, context, call
+        )
+
+    def _retrieval(self, ctx: AgentRuntimeContext, wf: Workflow) -> AgentRuntimeContext:
+        """Give the agent this project's history and repository index (spec section 101)."""
+        ctx.knowledge = self.knowledge
+        ctx.repository_id = wf.project_id or project_id_for(wf.repository_path or "")
+        return ctx
+
+    async def _history(self, wf: Workflow, text: str) -> str:
+        """Similar failures from earlier workflows of this project, with their fixes."""
+        if self.knowledge is None or not self.knowledge.available():
+            return ""
+        from forgeflow.knowledge.service import format_hits
+
+        hits = await self.knowledge.similar_failures(
+            text,
+            wf.project_id or project_id_for(wf.repository_path or ""),
+            exclude_workflow=wf.workflow_id,
+        )
+        return format_hits(hits, max_chars=500) if hits else ""
+
     async def _handle(self, wf: Workflow, task: Task) -> HandlerOutput:
         if wf.execution is None or wf.repository_path is None:
             raise ValidationFailed("workflow has no execution context")
@@ -264,6 +318,8 @@ class TaskExecutor:
             return await self._integrate(wf, task, spec)
         if task.kind == "repair":
             return await self._repair(wf, task, spec)
+        if task.kind == "publish":
+            return await self._publish(wf, task)
         return await self.verification.run(wf, task, spec)
 
     async def _decompose(
@@ -271,11 +327,21 @@ class TaskExecutor:
     ) -> HandlerOutput:
         started = utcnow()
         repo = self.worktrees.repository(wf.repository_path or "")
-        ctx = AgentRuntimeContext(
-            workflow_id=wf.workflow_id, task_id=task.task_id, repository_root=repo
+        ctx = self._retrieval(
+            AgentRuntimeContext(
+                workflow_id=wf.workflow_id, task_id=task.task_id, repository_root=repo
+            ),
+            wf,
         )
-        outcome = await self.gateway.plan_development(
-            ctx, DevelopmentRequest(spec, self.settings.max_subtasks)
+        outcome, manifest = await self._capable(
+            wf,
+            task,
+            "developer",
+            ctx,
+            spec,
+            lambda: self.gateway.plan_development(
+                ctx, DevelopmentRequest(spec, self.settings.max_subtasks)
+            ),
         )
         plan = outcome.output
         ordered = validate_plan(plan.subtasks, self.settings.max_subtasks)
@@ -331,6 +397,7 @@ class TaskExecutor:
         if uncovered:
             risks.append(f"acceptance criteria not mapped to any subtask: {sorted(uncovered)}")
         result = TaskResult(
+            capability_manifest=manifest,
             summary=plan.summary,
             risks=risks,
             next_actions=[f"{t.key}: {t.title}" for t in new_tasks],
@@ -387,19 +454,27 @@ class TaskExecutor:
             file_scope=task.file_scope,
             checks=checks,
         )
+        self._retrieval(ctx, wf)
         started = utcnow()
-        outcome = await self.gateway.implement_subtask(
+        outcome, manifest = await self._capable(
+            wf,
+            task,
+            "developer_subagent",
             ctx,
-            ImplementationRequest(
-                specification=spec,
-                task=task,
-                upstream=[
-                    f"{p.key} ({p.title}): {p.result.summary}"
-                    for p in predecessors
-                    if p.result and p.key in prepared.merged
-                ],
-                available_checks=[k for k in checks.available() if k != "setup"],
-                warnings=prepared.warnings,
+            spec,
+            lambda: self.gateway.implement_subtask(
+                ctx,
+                ImplementationRequest(
+                    specification=spec,
+                    task=task,
+                    upstream=[
+                        f"{p.key} ({p.title}): {p.result.summary}"
+                        for p in predecessors
+                        if p.result and p.key in prepared.merged
+                    ],
+                    available_checks=[k for k in checks.available() if k != "setup"],
+                    warnings=prepared.warnings,
+                ),
             ),
         )
         risks = list(outcome.output.risks) + prepared.warnings
@@ -426,6 +501,7 @@ class TaskExecutor:
             if not c.passed and c.kind != "setup"
         ]
         result = TaskResult(
+            capability_manifest=manifest,
             summary=outcome.output.summary,
             files_changed=files,
             commit=commit,
@@ -604,13 +680,23 @@ class TaskExecutor:
             file_scope=task.file_scope,
             checks=checks,
         )
+        self._retrieval(ctx, wf)
+        history = await self._history(wf, task.instructions)
         started = utcnow()
-        outcome = await self.gateway.implement_subtask(
+        outcome, manifest = await self._capable(
+            wf,
+            task,
+            "developer_subagent",
             ctx,
-            ImplementationRequest(
-                specification=spec,
-                task=task,
-                available_checks=[k for k in checks.available() if k != "setup"],
+            spec,
+            lambda: self.gateway.implement_subtask(
+                ctx,
+                ImplementationRequest(
+                    specification=spec,
+                    task=task,
+                    available_checks=[k for k in checks.available() if k != "setup"],
+                    history=history,
+                ),
             ),
         )
         risks = list(outcome.output.risks)
@@ -630,12 +716,14 @@ class TaskExecutor:
             integration = self.worktrees.path_for(wf.workflow_id, "integration")
             await self.git.fast_forward(integration, commit)
         result = TaskResult(
+            capability_manifest=manifest,
             summary=outcome.output.summary,
             files_changed=[f for f in changed if f not in outside],
             commit=commit,
             branch=prepared.workspace.branch,
             checks=checks.runs,
-            risks=risks,
+            risks=risks
+            + (["similar earlier failures were provided to the repair agent"] if history else []),
             next_actions=outcome.output.next_actions,
         )
         run = run_from_outcome(task, "developer_subagent", outcome, started)
@@ -646,4 +734,133 @@ class TaskExecutor:
             agent_runs=[run],
             events=events,
             workspace_id=prepared.workspace.workspace_id,
+        )
+
+    async def _publish(self, wf: Workflow, task: Task) -> HandlerOutput:
+        """Push the verified branch and open the pull request (spec sections 58, 192, 236).
+
+        Both operations go through the capability gateway; opening the PR is ASK by
+        default, so it waits for a human decision. A rejected or expired approval is
+        a normal outcome: the workflow completes without a PR.
+        """
+        ext = self.extensibility
+        if ext is None or wf.execution is None or wf.repository_path is None:
+            raise ValidationFailed("publishing requires the extensibility gateway")
+        project = await ext.projects.find_for_repository(wf.repository_path)
+        if project is None or project.github is None:
+            raise ValidationFailed("the project has no GitHub binding")
+        binding = project.github
+        connector = await ext.connectors.get(project.owner_id, binding.connector_id)
+        if connector.repositories and binding.repository not in connector.repositories:
+            raise ValidationFailed(f"connector is not allowed to access {binding.repository}")
+        # An autonomous (L4) run publishes under its action profile: a draft PR is
+        # AUTO there, anything else follows the profile (additional.md section 2.5).
+        profile = None
+        if wf.trace_id:
+            docs = await ext.store.find("autonomy_runs", {"trace_id": wf.trace_id}, limit=1)
+            if docs:
+                from forgeflow.schemas.autonomy import ActionProfile
+
+                profile = ActionProfile.model_validate(docs[0]["action_profile"])
+        inv = Invocation(
+            owner_id=project.owner_id,
+            workflow_id=wf.workflow_id,
+            task_id=task.task_id,
+            agent="publisher",
+            project=project,
+            action_profile=profile,
+            trace_id=wf.trace_id,
+        )
+        draft = binding.draft or profile is not None
+        pr_capability = (
+            "github.pull_request.create_draft"
+            if profile is not None
+            else "github.pull_request.create"
+        )
+        caps = {
+            c.capability_id: c
+            for c in github_capabilities(connector.connector_id, project.owner_id)
+        }
+
+        async def connector_status() -> str:
+            return await ext.connectors.status(connector.connector_id)
+
+        commit = wf.execution.target_commit or wf.execution.integration_commit or ""
+        branch = f"forgeflow/{wf.workflow_id}"
+        base = binding.base_branch or wf.execution.base_ref
+        report = wf.report
+        title = (report.pr_title if report else wf.request)[:250]
+        body = report.pr_body if report else wf.request
+        repo = self.worktrees.repository(wf.repository_path)
+        try:
+            token = await ext.connectors.token(connector)
+            await ext.gateway.invoke(
+                inv,
+                caps["github.branch.push"],
+                lambda: push_branch(
+                    repo,
+                    commit,
+                    branch,
+                    token,
+                    binding.repository,
+                    remote_url=self.settings.github_push_url_template.format(
+                        repository=binding.repository
+                    ),
+                ),
+                summary=f"Push {branch} ({commit[:10]}) to {binding.repository}",
+                source_status=connector_status,
+            )
+            client = await ext.connectors.client(connector)
+            pr = await ext.gateway.invoke(
+                inv,
+                caps[pr_capability],
+                lambda: client.create_pull_request(
+                    binding.repository, branch, base, title, body, draft
+                ),
+                summary=f"Open pull request '{title}' on {binding.repository}: {branch} -> {base}",
+                details={
+                    "repository": binding.repository,
+                    "head": branch,
+                    "base": base,
+                    "title": title,
+                    "draft": draft,
+                    "files_changed": len(report.files_changed) if report else 0,
+                    "outcome": report.outcome if report else None,
+                },
+                source_status=connector_status,
+            )
+        except CapabilityDenied as exc:
+            return HandlerOutput(
+                result=TaskResult(
+                    summary=f"Pull request not created: {exc}",
+                    branch=branch,
+                    commit=commit,
+                    risks=[str(exc)],
+                )
+            )
+        info = {
+            "repository": binding.repository,
+            "number": pr.number,
+            "url": pr.url,
+            "branch": branch,
+            "base": base,
+            "state": pr.state,
+            "draft": pr.draft,
+            "opened_at": utcnow().isoformat(),
+        }
+        event = task_event(
+            task,
+            EventType.PULL_REQUEST_OPENED,
+            url=pr.url,
+            number=pr.number,
+            repository=binding.repository,
+        )
+        return HandlerOutput(
+            result=TaskResult(
+                summary=f"Opened pull request #{pr.number} on {binding.repository}",
+                branch=branch,
+                commit=commit,
+                pull_request=info,
+            ),
+            events=[event],
         )

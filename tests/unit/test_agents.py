@@ -14,7 +14,7 @@ def model():
 
 def test_prompts_are_versioned():
     assert orchestrator.prompt().version == "1.0.0"
-    assert analyzer.prompt().version == "1.0.0"
+    assert analyzer.prompt().version == "1.1.0"
 
 
 def test_requirement_analyzer_has_only_read_only_tools():
@@ -57,6 +57,8 @@ def test_development_agents_have_the_right_tools():
         "list_files",
         "read_file",
         "search_code",
+        "search_engineering_history",
+        "search_repository_index",
     ]
     assert names(subagent.create_developer_subagent(model())) == [
         "delete_file",
@@ -65,6 +67,8 @@ def test_development_agents_have_the_right_tools():
         "replace_in_file",
         "run_check",
         "search_code",
+        "search_engineering_history",
+        "search_repository_index",
         "write_file",
     ]
     assert "run_check" not in names(subagent.create_developer_subagent(model(), with_checks=False))
@@ -74,6 +78,6 @@ def test_development_agents_have_the_right_tools():
         "search_code",
         "write_file",
     ]
-    assert developer.prompt().version == "1.1.0"  # adds A2A answering
-    for module in (subagent, integrator):
-        assert module.prompt().version == "1.0.0"
+    assert developer.prompt().version == "1.2.0"  # A2A answering, history search
+    assert subagent.prompt().version == "1.1.0"  # history search
+    assert integrator.prompt().version == "1.0.0"

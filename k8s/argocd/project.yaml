@@ -1,0 +1,29 @@
+# Argo CD AppProject: what Argo CD may deploy for ForgeFlow (least privilege).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: forgeflow
+  namespace: argocd
+spec:
+  description: ForgeFlow platform
+  sourceRepos:
+    - https://github.com/IAmParthivsinh-15/ForgeFlow.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: forgeflow
+  # Cluster-scoped resources ForgeFlow's manifests need; nothing else.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: "*"
+  roles:
+    # Token for ForgeFlow's Argo CD connector: read, sync and roll back this app only.
+    # Create: argocd proj role create-token forgeflow forgeflow-connector
+    - name: forgeflow-connector
+      description: Used by ForgeFlow deployment checks (status) and approved sync/rollback
+      policies:
+        - p, proj:forgeflow:forgeflow-connector, applications, get, forgeflow/*, allow
+        - p, proj:forgeflow:forgeflow-connector, applications, sync, forgeflow/*, allow
+        - p, proj:forgeflow:forgeflow-connector, applications, action/*, forgeflow/*, deny

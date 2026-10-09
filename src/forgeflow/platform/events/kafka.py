@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
@@ -54,9 +55,17 @@ async def kafka_ping(bootstrap_servers: str) -> None:
 class OutboxRelay:
     """Publishes committed outbox events to Kafka, keyed by workflow_id for ordering."""
 
-    def __init__(self, store: WorkflowStore, bootstrap_servers: str, interval: float = 0.5) -> None:
+    def __init__(
+        self,
+        store: WorkflowStore,
+        bootstrap_servers: str,
+        interval: float = 0.5,
+        observer: Callable[[Event], None] | None = None,
+    ) -> None:
         self.store = store
         self.interval = interval
+        # Called once per event after it is marked published (metrics, spec section 67).
+        self.observer = observer
         self.producer = AIOKafkaProducer(
             bootstrap_servers=bootstrap_servers, acks="all", enable_idempotence=True
         )
@@ -76,6 +85,9 @@ class OutboxRelay:
             )
             published.append(event.event_id)
         await self.store.mark_events_published(published)
+        if self.observer is not None:
+            for event in events:
+                self.observer(event)
         return len(published)
 
     async def run(self, stop: asyncio.Event) -> None:

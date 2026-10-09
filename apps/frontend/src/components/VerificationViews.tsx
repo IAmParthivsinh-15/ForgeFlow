@@ -1,4 +1,5 @@
 import type { CIReport, QAReport, ReviewReport, SecurityReport, Severity, TaskResult, Verdict } from "../lib/api";
+import { artifactUrl } from "../lib/ext";
 
 const SEVERITY_STYLE: Record<Severity, string> = {
   critical: "bg-rose-600 text-white",
@@ -175,12 +176,25 @@ export function QAView({ report }: { report: QAReport }) {
                 <td className="py-1.5 text-xs text-slate-600 dark:text-slate-300">
                   {c.evidence}
                   {c.checks.length > 0 && <div className="mt-0.5 font-mono text-slate-500">{c.checks.join(", ")}</div>}
+                  {(c.artifacts ?? []).length > 0 && <Screenshots ids={c.artifacts ?? []} />}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {(report.browser_url || report.browser_note) && (
+        <p className="text-xs text-slate-500">
+          Browser (Playwright MCP):{" "}
+          {report.browser_url ? (
+            <>
+              served the commit at <code>{report.browser_url}</code> · {report.browser_actions ?? 0} browser action(s)
+            </>
+          ) : (
+            <span className="text-amber-700 dark:text-amber-400">{report.browser_note}</span>
+          )}
+        </p>
+      )}
       {report.downgraded.length > 0 && (
         <p className="text-xs text-amber-700 dark:text-amber-400">
           Downgraded to UNCERTAIN for lack of executed evidence: {report.downgraded.join(", ")}
@@ -196,6 +210,24 @@ export function QAView({ report }: { report: QAReport }) {
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Evidence screenshots captured through Playwright MCP (stored as artifacts). */
+export function Screenshots({ ids }: { ids: string[] }) {
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-2">
+      {ids.map((id) => (
+        <a key={id} href={artifactUrl(id)} target="_blank" rel="noreferrer" title={`Evidence ${id}`}>
+          <img
+            src={artifactUrl(id)}
+            alt={`Screenshot evidence ${id}`}
+            loading="lazy"
+            className="h-20 w-32 rounded border border-slate-200 object-cover object-top dark:border-slate-700"
+          />
+        </a>
+      ))}
     </div>
   );
 }

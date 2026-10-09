@@ -20,6 +20,9 @@ export function useWorkflowStream(workflowId: string) {
       );
       queryClient.invalidateQueries({ queryKey: ["workflow", workflowId] });
       queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      if (event.event_type.startsWith("approval.")) {
+        queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      }
       if (event.event_type === "a2a.exchange") {
         queryClient.invalidateQueries({ queryKey: ["a2a", workflowId] });
       }
@@ -56,6 +59,12 @@ export function useWorkflowStream(workflowId: string) {
       "workflow.awaiting_decision",
       "workflow.completed",
       "a2a.exchange",
+      "capability.used",
+      "preview.started",
+      "ci.build_completed",
+      "approval.requested",
+      "approval.resolved",
+      "github.pull_request_opened",
     ];
     types.forEach((t) => source.addEventListener(t, onEvent as EventListener));
     source.onmessage = onEvent;

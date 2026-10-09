@@ -1,0 +1,80 @@
+# The "scheduler" (spec section 111): outbox relay, scheduler ticks, reaper, metrics,
+# knowledge indexing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-worker
+  labels:
+    app.kubernetes.io/name: orchestrator-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orchestrator-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orchestrator-worker
+        forgeflow.dev/role: app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+    spec:
+      serviceAccountName: forgeflow
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: forgeflow/python
+          command: ["python", "-m", "forgeflow.apps.worker.main"]
+          ports:
+            - name: metrics
+              containerPort: 9101
+          envFrom:
+            - configMapRef:
+                name: forgeflow-config
+            - secretRef:
+                name: forgeflow-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: repos
+              mountPath: /repos
+            - name: workspaces
+              mountPath: /workspaces
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: forgeflow-repos
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: forgeflow-workspaces
+---
+# Headless: Prometheus discovers every replica by DNS (ops/prometheus/prometheus.yml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-worker
+  labels:
+    app.kubernetes.io/name: orchestrator-worker
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: orchestrator-worker
+  ports:
+    - name: metrics
+      port: 9101
+      targetPort: metrics

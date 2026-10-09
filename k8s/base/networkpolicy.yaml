@@ -1,0 +1,184 @@
+# Network policy (spec section 72): deny by default, then allow only what each component
+# needs. Enforced only by a CNI that supports NetworkPolicy (minikube: --cni=calico).
+#
+# "External" below means the internet only (private ranges are excluded), on the ports
+# ForgeFlow uses: 443 (LLM providers, GitHub, Argo CD, package registries, HTTP MCP
+# servers) and 27017 (MongoDB Atlas). Add your Jenkins port if Jenkins runs outside.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# ForgeFlow app pods -> data services and the internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-egress
+spec:
+  podSelector:
+    matchLabels:
+      forgeflow.dev/role: app
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              forgeflow.dev/role: data
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: platform-api
+      ports:
+        - { protocol: TCP, port: 8000 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: playwright-mcp
+      ports:
+        - { protocol: TCP, port: 8931 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 27017 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 80 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: platform-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: frontend
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - { protocol: TCP, port: 8000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metrics-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestrator-worker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - { protocol: TCP, port: 9101 }
+---
+# The browser: reachable from the API (tool discovery) and agent workers only; it may
+# open nothing but the agent workers' preview ports - no internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: playwright-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: playwright-mcp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: platform-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-worker
+      ports:
+        - { protocol: TCP, port: 8931 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agent-worker
+      ports:
+        - { protocol: TCP, port: 4173 }
+        - { protocol: TCP, port: 4174 }
+        - { protocol: TCP, port: 4175 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: preview-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-worker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: playwright-mcp
+      ports:
+        - { protocol: TCP, port: 4173 }
+        - { protocol: TCP, port: 4174 }
+        - { protocol: TCP, port: 4175 }
+---
+# Data services accept connections from ForgeFlow app pods only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-ingress
+spec:
+  podSelector:
+    matchLabels:
+      forgeflow.dev/role: data
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              forgeflow.dev/role: app
+        - podSelector:
+            matchLabels:
+              forgeflow.dev/role: data

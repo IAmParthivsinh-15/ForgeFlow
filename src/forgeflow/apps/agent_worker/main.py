@@ -68,7 +68,7 @@ async def main() -> None:
     settings = get_settings()
     configure_logging("agent-worker", settings.log_level)
     await ensure_topics(settings.kafka_bootstrap_servers)
-    container = await build_container(settings)
+    container = await build_container(settings, "agent-worker")
     worker_id = f"{socket.gethostname()}-{new_id('w')}"
     slots = Slots(container.executor(worker_id), settings.agent_worker_concurrency)
     consumer = AIOKafkaConsumer(

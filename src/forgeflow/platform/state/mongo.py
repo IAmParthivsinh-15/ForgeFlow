@@ -45,7 +45,7 @@ class MongoWorkflowStore:
         self.a2a = self.db["a2a_messages"]
         self.events = self.db["events"]
 
-    async def ensure_indexes(self) -> None:
+    async def ensure_indexes(self, event_retention_days: int = 30) -> None:
         await self.workflows.create_index([("created_at", DESCENDING)])
         await self.requirements.create_index(
             [("workflow_id", ASCENDING), ("version", ASCENDING)], unique=True
@@ -60,6 +60,11 @@ class MongoWorkflowStore:
             [("workflow_id", ASCENDING), ("seq", ASCENDING)], unique=True
         )
         await self.events.create_index([("published", ASCENDING), ("timestamp", ASCENDING)])
+        # Bounded storage (e.g. MongoDB Atlas free tier): published events expire. Events
+        # still waiting in the outbox have no published_at and are never removed.
+        await self.events.create_index(
+            [("published_at", ASCENDING)], expireAfterSeconds=event_retention_days * 86400
+        )
         await self._migrate_event_counters()
 
     async def _migrate_event_counters(self) -> None:

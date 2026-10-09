@@ -80,6 +80,11 @@ export function visualDeps(t: Task, tasks: Task[]): string[] {
     const before = t.round > 1 ? byKind("repair", t.round - 1) : byKind("integrate");
     return before.map((x) => x.task_id);
   }
+  if (t.kind === "publish") {
+    const last = Math.max(0, ...tasks.filter((x) => VERIFICATION.has(x.kind)).map((x) => x.round));
+    const round = tasks.filter((x) => VERIFICATION.has(x.kind) && x.round === last);
+    return (round.length ? round : byKind("integrate")).map((x) => x.task_id);
+  }
   if (t.kind === "repair") {
     return tasks.filter((x) => VERIFICATION.has(x.kind) && x.round === t.round).map((x) => x.task_id);
   }
@@ -156,6 +161,7 @@ export function TaskGraph({
         edges={edges}
         nodeTypes={nodeTypes}
         onNodeClick={(_, node) => onSelect(node.id)}
+        colorMode="dark"
         fitView
         fitViewOptions={{ padding: 0.15 }}
         nodesConnectable={false}

@@ -1,0 +1,20 @@
+# stdio MCP servers ForgeFlow may start (spec section 207).
+#
+# Users register a stdio MCP server by picking a key from this list; they can never
+# supply their own command. Each server runs as a child process of the agent worker,
+# inside its container, with only the environment variables listed in `env`.
+#
+# Add an entry here (and rebuild) to allow another stdio server.
+
+servers:
+  playwright:
+    description: Microsoft Playwright MCP - browser automation for the QA agent (spec section 28).
+    command: npx
+    args: ["-y", "@playwright/mcp@latest", "--headless", "--isolated"]
+    env: []
+
+  everything:
+    description: MCP reference test server (tools, prompts, resources) - for trying the gateway.
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-everything"]
+    env: []

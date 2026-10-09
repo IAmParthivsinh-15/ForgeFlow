@@ -121,6 +121,55 @@ class GitClient:
                 if target.is_file() or target.is_symlink():
                     target.unlink()
 
+    async def tree_files(self, repo: Path, commit: str) -> list[tuple[str, int]]:
+        """(path, size in bytes) of every blob in `commit`, without a checkout."""
+        out = (await self.run(repo, "ls-tree", "-r", "-l", "-z", validate_sha(commit))).stdout
+        files = []
+        for entry in out.split("\0"):
+            if not entry:
+                continue
+            meta, _, path = entry.partition("\t")
+            parts = meta.split()
+            if len(parts) == 4 and parts[1] == "blob" and parts[3].isdigit():
+                files.append((path, int(parts[3])))
+        return files
+
+    async def read_blobs(self, repo: Path, commit: str, paths: list[str]) -> dict[str, bytes]:
+        """Contents of `paths` at `commit` in one `git cat-file --batch` process."""
+        if not paths:
+            return {}
+        validate_sha(commit)
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "cat-file",
+            "--batch",
+            cwd=str(repo),
+            env=self._env(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        request = "".join(f"{commit}:{p}\n" for p in paths if "\n" not in p).encode()
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(request), 120)
+        except TimeoutError as exc:
+            proc.kill()
+            raise GitError("git cat-file timed out") from exc
+        blobs: dict[str, bytes] = {}
+        pos = 0
+        for path in paths:
+            end = out.find(b"\n", pos)
+            if end == -1:
+                break
+            header = out[pos:end].decode("utf-8", errors="replace").split()
+            pos = end + 1
+            if len(header) != 3 or header[1] != "blob":
+                continue  # "<object> missing"
+            size = int(header[2])
+            blobs[path] = out[pos : pos + size]
+            pos += size + 1
+        return blobs
+
     async def head(self, repo: Path) -> tuple[str, str]:
         """(commit sha, symbolic branch name or 'HEAD')."""
         sha = (await self.run(repo, "rev-parse", "HEAD")).stdout.strip()

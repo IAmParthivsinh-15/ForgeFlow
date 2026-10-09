@@ -14,7 +14,9 @@ from forgeflow.core.errors import InvalidStateTransition
 from forgeflow.schemas.workflow import WorkflowStatus as S
 
 TERMINAL = frozenset({S.COMPLETED, S.CANCELLED, S.FAILED})
-EXECUTION_STATES = frozenset({S.EXECUTING, S.INTEGRATING, S.REVIEWING, S.TESTING, S.CI})
+EXECUTION_STATES = frozenset(
+    {S.EXECUTING, S.INTEGRATING, S.REVIEWING, S.TESTING, S.CI, S.WAITING_FOR_APPROVAL, S.PUBLISHING}
+)
 
 _TRANSITIONS: dict[S, frozenset[S]] = {
     S.CREATED: frozenset({S.PLANNING, S.CANCELLED, S.FAILED}),

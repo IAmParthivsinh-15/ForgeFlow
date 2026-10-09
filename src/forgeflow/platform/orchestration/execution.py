@@ -24,7 +24,7 @@ are ready, serializes conflicting ones, and dispatches the rest by emitting
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -43,11 +43,13 @@ from forgeflow.platform.task_graph.state_machine import ACTIVE, ensure_transitio
 from forgeflow.platform.verification.change_analyzer import analyze_changes
 from forgeflow.platform.worktrees.manager import WorktreeManager
 from forgeflow.schemas.events import Event, EventType, Topics
+from forgeflow.schemas.extensibility import CapabilitySnapshot
 from forgeflow.schemas.requirement import RequiredCapabilities
 from forgeflow.schemas.task import VERIFICATION_KINDS, Task, TaskStatus
 from forgeflow.schemas.workflow import (
     Capability,
     ExecutionInfo,
+    PullRequestInfo,
     RouteStage,
     Workflow,
     WorkflowStatus,
@@ -58,6 +60,8 @@ logger = logging.getLogger(__name__)
 
 EXECUTING_STATES = EXECUTION_STATES
 TICK_RETRIES = 5
+# Agents whose capability manifests are pinned at execution start.
+SNAPSHOT_AGENTS = ("developer", "developer_subagent", "code_review", "security", "qa")
 PROGRESSING = frozenset(
     {TaskStatus.READY, TaskStatus.DISPATCHED, TaskStatus.RUNNING, TaskStatus.RETRYING}
 )
@@ -76,6 +80,7 @@ STATUS_FOR_STAGE: dict[str, WorkflowStatus] = {
 }
 # Workflow status while a task of this kind is active (highest priority first).
 _STATUS_BY_KIND = (
+    ("publish", WorkflowStatus.PUBLISHING),
     ("ci", WorkflowStatus.CI),
     ("qa", WorkflowStatus.TESTING),
     ("review", WorkflowStatus.REVIEWING),
@@ -88,12 +93,21 @@ _STATUS_BY_KIND = (
 
 
 def task_event(task: Task, event_type: str, **payload: Any) -> Event:
+    base: dict[str, Any] = {
+        "key": task.key,
+        "status": str(task.status),
+        "kind": task.kind,
+        "agent": task.agent_type,
+    }
+    if task.started_at and task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        ended = task.completed_at or task.updated_at
+        base["duration_ms"] = max(0, int((ended - task.started_at).total_seconds() * 1000))
     return Event(
         event_type=event_type,
         topic=Topics.TASK,
         workflow_id=task.workflow_id,
         task_id=task.task_id,
-        payload={"key": task.key, "status": str(task.status), **payload},
+        payload={**base, **payload},
     )
 
 
@@ -136,12 +150,20 @@ class ExecutionService:
         worktrees: WorktreeManager,
         settings: Settings,
         clock: Callable[[], datetime] = utcnow,
+        extensibility: Any = None,
     ) -> None:
         self.store = store
         self.git = git
         self.worktrees = worktrees
         self.settings = settings
         self.clock = clock
+        self.extensibility = extensibility
+        # L4 guardrails, installed by the autonomy layer (additional.md sections 3-4):
+        #   start_guard(wf)            -> reason execution may not start, or None
+        #   spawn_guard(wf, active)    -> (how many tasks may still start, reason)
+        # Enforced here, outside any LLM.
+        self.start_guard: Callable[[Workflow], Awaitable[str | None]] | None = None
+        self.spawn_guard: Callable[[Workflow, int], Awaitable[tuple[int, str | None]]] | None = None
 
     # ------------------------------------------------------------------ start
 
@@ -153,6 +175,11 @@ class ExecutionService:
             return None
         if not wf.route_plan.stages:
             return None
+        if self.start_guard is not None:
+            blocked = await self.start_guard(wf)
+            if blocked is not None:
+                log_event(logger, "execution not started", reason=blocked)
+                return None
         revision = wf.revision
         now = self.clock()
 
@@ -174,6 +201,7 @@ class ExecutionService:
         wf.execution = ExecutionInfo(
             base_commit=sha, base_ref=ref, target_commit=sha, started_at=now
         )
+        await self._snapshot_capabilities(wf, now)
         events = [
             workflow_event(wf, EventType.WORKFLOW_EXECUTION_STARTED, base_commit=sha, base_ref=ref)
         ]
@@ -270,12 +298,20 @@ class ExecutionService:
                 tasks = tasks + new
                 self._resolve_dependencies(new, {t.task_id: t for t in tasks}, changes, now)
 
+        allowance: int | None = None
+        if self.spawn_guard is not None and wf.status in EXECUTING_STATES:
+            active = sum(1 for t in tasks if t.status in ACTIVE)
+            allowance, why = await self.spawn_guard(wf, active)
+            if allowance <= 0:
+                for t in tasks:
+                    if t.status == TaskStatus.READY:
+                        self._set_wait(t, f"guardrail: {why}", changes, now)
         dispatched = (
-            self._dispatch(workflow_id, tasks, changes, now)
-            if wf.status in EXECUTING_STATES
+            self._dispatch(workflow_id, tasks, changes, now, allowance)
+            if wf.status in EXECUTING_STATES and (allowance is None or allowance > 0)
             else []
         )
-        self._sync_status(wf, tasks, wf_events, now)
+        await self._sync_status(wf, tasks, wf_events, now)
 
         wf_changed = wf.model_dump() != snapshot
         if changes.writes or wf_changed:
@@ -329,9 +365,14 @@ class ExecutionService:
                 changes.move(t, TaskStatus.READY, EventType.TASK_READY, now)
 
     def _dispatch(
-        self, workflow_id: str, tasks: list[Task], changes: TaskChanges, now: datetime
+        self,
+        workflow_id: str,
+        tasks: list[Task],
+        changes: TaskChanges,
+        now: datetime,
+        allowance: int | None = None,
     ) -> list[str]:
-        """Conflict-aware dispatch (spec sections 20, 113, 185)."""
+        """Conflict-aware dispatch (spec sections 20, 113, 185), capped by the L4 guard."""
         active = [t for t in tasks if t.status in ACTIVE]
         dispatched: list[str] = []
         ready = sorted(
@@ -339,6 +380,9 @@ class ExecutionService:
             key=lambda t: (-t.priority, t.created_at),
         )
         for t in ready:
+            if allowance is not None and len(dispatched) >= allowance:
+                self._set_wait(t, "guardrail: worker cap reached", changes, now)
+                continue
             if len(active) >= self.settings.max_parallel_tasks:
                 self._set_wait(t, "waiting for a free execution slot", changes, now)
                 continue
@@ -362,10 +406,23 @@ class ExecutionService:
             dispatched.append(t.task_id)
         return dispatched
 
-    def _sync_status(self, wf: Workflow, tasks: list[Task], events: list[Event], now: datetime):
-        """The workflow status follows the stage that is currently active."""
+    async def _sync_status(
+        self, wf: Workflow, tasks: list[Task], events: list[Event], now: datetime
+    ) -> None:
+        """The workflow status follows the stage that is currently active.
+
+        A pending human approval takes precedence (spec section 30: WAITING_FOR_APPROVAL).
+        """
         if wf.status not in EXECUTING_STATES:
             return
+        if self.extensibility is not None:
+            pending = await self.extensibility.store.find(
+                "approvals", {"workflow_id": wf.workflow_id, "status": "pending"}, limit=1
+            )
+            if pending:
+                if wf.status != WorkflowStatus.WAITING_FOR_APPROVAL:
+                    self._move_workflow(wf, WorkflowStatus.WAITING_FOR_APPROVAL, events, now)
+                return
         active_kinds = {t.kind for t in tasks if t.status in ACTIVE}
         for kind, status in _STATUS_BY_KIND:
             if kind in active_kinds:
@@ -392,6 +449,13 @@ class ExecutionService:
         last_round = max((t.round for t in verification), default=0)
         last_repair = max((t.round for t in tasks if t.kind == "repair"), default=0)
 
+        publish = next((t for t in tasks if t.kind == "publish"), None)
+        if publish is not None:
+            if publish.result and publish.result.pull_request:
+                wf.pull_request = PullRequestInfo.model_validate(publish.result.pull_request)
+            self._finish(wf, spec, tasks, events, now)
+            return []
+
         integrate = next((t for t in tasks if t.kind == "integrate"), None)
         if integrate and integrate.result and ex.integration_commit is None:
             ex.integration_branch = integrate.result.branch
@@ -413,9 +477,9 @@ class ExecutionService:
                 await self._route_by_change(wf, events)
             stages = self._verification_stages(wf)
             if not stages:
-                self._finish(wf, spec, tasks, events, now)
-                return []
-            self._create_round(wf, 1, stages, changes, events, now)
+                await self._complete(wf, spec, tasks, changes, events, now)
+            else:
+                self._create_round(wf, 1, stages, changes, events, now)
         elif last_repair == last_round:
             repair = max((t for t in tasks if t.kind == "repair"), key=lambda t: t.round)
             self._set_stage(wf, "development", "completed")
@@ -439,9 +503,10 @@ class ExecutionService:
                     "failed" if t.result and t.result.blocking else "completed",
                 )
             blockers = [t for t in round_tasks if t.result and t.result.blocking]
-            if not blockers or not self._has_development(wf):
+            if not blockers or not self._has_development(wf) or ex.accepted_risks:
                 # A pure review/audit reports its findings; there is nothing to repair.
-                self._finish(wf, spec, tasks, events, now)
+                # Accepted risks were decided by a human (resolve_decision).
+                await self._complete(wf, spec, tasks, changes, events, now)
             elif ex.repair_attempts < self.settings.max_repair_attempts + ex.extra_repairs_allowed:
                 self._request_repair(wf, tasks, blockers, last_round, changes, events, now)
             else:
@@ -646,6 +711,100 @@ class ExecutionService:
         events.append(workflow_event(wf, EventType.WORKFLOW_AWAITING_DECISION, reasons=reasons))
         self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
 
+    async def _complete(
+        self,
+        wf: Workflow,
+        spec: Any,
+        tasks: list[Task],
+        changes: TaskChanges,
+        events: list[Event],
+        now: datetime,
+    ) -> None:
+        """Verification is done: open the pull request if the project wants one, else finish."""
+        if not await self._should_publish(wf):
+            self._finish(wf, spec, tasks, events, now)
+            return
+        wf.report = build_report(wf, spec, tasks)  # the PR description comes from it
+        task = Task(
+            task_id=f"{wf.workflow_id}.P1-publish",
+            workflow_id=wf.workflow_id,
+            key="P1-publish",
+            title="Open the pull request on GitHub",
+            kind="publish",
+            agent_type="github",
+            instructions="Push the verified branch and open a pull request (requires approval).",
+            status=TaskStatus.PENDING,
+            max_attempts=self.settings.task_max_attempts,
+            priority=100,
+            created_at=now,
+            updated_at=now,
+        )
+        changes.insert(task)
+        changes.events.append(task_event(task, EventType.TASK_CREATED, kind="publish"))
+
+    async def _should_publish(self, wf: Workflow) -> bool:
+        ext = self.extensibility
+        ex = wf.execution
+        if ext is None or ex is None or not self._has_development(wf):
+            return False
+        if not ex.target_commit or ex.target_commit == ex.base_commit:
+            return False  # nothing was changed
+        project = await ext.projects.find_for_repository(wf.repository_path)
+        if not (project and project.github and project.github.auto_pull_request):
+            return False
+        connector = await ext.store.get("connectors", project.github.connector_id)
+        if connector is None or connector["status"] != "active":
+            state = connector["status"] if connector else "deleted"
+            ex.note = (
+                f"Pull request not opened: the GitHub connector is {state}. "
+                "Reconnect it and push the branch manually or re-run the workflow."
+            )
+            return False
+        return True
+
+    async def _snapshot_capabilities(self, wf: Workflow, now: datetime) -> None:
+        """Pin skill versions and record MCP/connector configuration (spec section 244)."""
+        ext = self.extensibility
+        if ext is None or not wf.repository_path:
+            return
+        project = await ext.projects.ensure(self.settings.local_user_id, wf.repository_path)
+        wf.project_id = project.project_id
+        spec = await self.store.get_specification(wf.workflow_id)
+        parts = [wf.request]
+        if spec is not None:
+            parts += [spec.summary, spec.goal, *(c.description for c in spec.checklist)]
+            parts += [
+                f"{ac.description} ({ac.verification.replace('_', ' ')})"
+                for ac in spec.acceptance_criteria
+            ]
+        context = " ".join(parts)
+        manifests = {}
+        for agent in SNAPSHOT_AGENTS:
+            resolution = await ext.resolver.resolve(
+                owner_id=project.owner_id,
+                workflow_id=wf.workflow_id,
+                project=project,
+                agent=agent,
+                context=context,
+            )
+            manifests[agent] = resolution.manifest
+        mcp_hashes = {}
+        for mcp_id in project.enabled_mcp_ids:
+            doc = await ext.store.get("mcp_servers", mcp_id)
+            if doc:
+                mcp_hashes[mcp_id] = doc.get("config_hash", "")
+        scopes = {}
+        if project.github:
+            doc = await ext.store.get("connectors", project.github.connector_id)
+            if doc:
+                scopes[doc["connector_id"]] = list(doc.get("scopes", []))
+        wf.capability_snapshot = CapabilitySnapshot(
+            resolved_at=now,
+            manifests=manifests,
+            mcp_config_hashes=mcp_hashes,
+            connector_scopes=scopes,
+        )
+
     def _finish(
         self, wf: Workflow, spec: Any, tasks: list[Task], events: list[Event], now: datetime
     ) -> None:
@@ -710,7 +869,11 @@ class ExecutionService:
         wf.updated_at = now
         events.append(
             workflow_event(
-                wf, EventType.WORKFLOW_STATUS_CHANGED, previous=str(previous), current=str(target)
+                wf,
+                EventType.WORKFLOW_STATUS_CHANGED,
+                previous=str(previous),
+                current=str(target),
+                age_seconds=round((now - wf.created_at).total_seconds(), 3),
             )
         )
 
@@ -741,15 +904,9 @@ class ExecutionService:
                 for t in tasks
                 if t.round == last and t.result and t.result.blocking
                 for r in t.result.blocking_reasons
-            ]
-            spec = await self.store.get_specification(workflow_id)
-            self._finish(wf, spec, tasks, events, now)
-            result = await self.store.commit(
-                Commit(workflow=wf, expected_revision=revision, events=events)
-            )
-            assert result.workflow is not None
-            return result.workflow
-        ex.extra_repairs_allowed += 1
+            ] or ["blocking findings accepted by a human"]
+        else:
+            ex.extra_repairs_allowed += 1
         self._move_workflow(wf, WorkflowStatus.EXECUTING, events, now)
         await self.store.commit(Commit(workflow=wf, expected_revision=revision, events=events))
         await self.tick(workflow_id)
@@ -788,6 +945,42 @@ class ExecutionService:
         )
         await self.tick(wf.workflow_id)
         return result.tasks[task_id]
+
+    async def halt_for_stop(self, workflow_id: str, reason: str) -> list[str]:
+        """Emergency stop (additional.md section 5): stop active work, keep it resumable.
+
+        Dispatched/running tasks become FAILED (not retryable) so their workers see
+        they lost ownership and no reaper retries them; queued tasks stay put because
+        the spawn guard refuses to dispatch them. The workflow pauses. Resume re-queues
+        the halted tasks explicitly.
+        """
+        wf = await self.store.get_workflow(workflow_id)
+        now = self.clock()
+        changes = TaskChanges()
+        halted = []
+        for t in await self.store.list_tasks(workflow_id):
+            if t.status in ACTIVE:
+                t.error = f"emergency stop: {reason}"[:500]
+                t.retryable = False
+                changes.move(
+                    t, TaskStatus.FAILED, EventType.TASK_FAILED, now, error=t.error, halted=True
+                )
+                halted.append(t.task_id)
+        events: list[Event] = []
+        wf_changed = False
+        if wf.status in EXECUTING_STATES:
+            wf.error = f"Stopped: {reason}"
+            self._move_workflow(wf, WorkflowStatus.PAUSED, events, now)
+            wf_changed = True
+        await self.store.commit(
+            Commit(
+                workflow=wf if wf_changed else None,
+                expected_revision=wf.revision,
+                tasks=changes.task_writes(),
+                events=changes.events + events,
+            )
+        )
+        return halted
 
     async def cancel_task(self, task_id: str) -> Task:
         task = await self.store.get_task(task_id)

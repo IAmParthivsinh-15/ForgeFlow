@@ -1,10 +1,16 @@
-# ForgeFlow local development stack - Phase 0 and Milestones 1-3.
+# ForgeFlow local development stack.
 #
-#   docker compose --profile ci up --build -d     # with local Jenkins for the CI stage
-#   docker compose up --build -d                  # without Jenkins (CI stage pauses)
+#   docker compose up --build -d                          # core (no CI, search, metrics, browser)
+#   docker compose --profile ci up --build -d             # + local Jenkins for the CI stage
+#   docker compose --profile ci --profile search --profile observability --profile browser \
+#     up --build -d                                       # everything (needs ~6 GB for Docker)
+#
+# Profiles:   ci             Jenkins                     http://localhost:8081
+#             search         Elasticsearch (history/RAG) http://localhost:9200
+#             observability  Prometheus + Grafana        http://localhost:9090  http://localhost:3000
+#             browser        Playwright MCP (browser QA) internal network only
 #
 # UI: http://localhost:8080   API: http://localhost:8000/docs   Health: http://localhost:8000/health
-# Jenkins (profile ci): http://localhost:8081  user/password from JENKINS_USER/JENKINS_PASSWORD
 
 x-python-service: &python-service
   build:
@@ -14,22 +20,33 @@ x-python-service: &python-service
     - path: .env
       required: false
   environment:
-    MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+    # Local MongoDB by default. For MongoDB Atlas set MONGODB_URI_CONTAINERS in .env to your
+    # mongodb+srv:// connection string (see README "MongoDB Atlas").
+    MONGODB_URI: ${MONGODB_URI_CONTAINERS:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
     REDIS_URL: redis://redis:6379/0
     KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     REPOS_ROOT: /repos
     WORKSPACES_ROOT: /workspaces
     # Interpolated from the shell or .env, so `FAKE_LLM=true docker compose up` works too.
     FAKE_LLM: ${FAKE_LLM:-false}
+    # Encrypts connector/MCP credentials; read from .env (or the shell).
+    FORGEFLOW_SECRET_KEY: ${FORGEFLOW_SECRET_KEY:-}
     JENKINS_URL: http://jenkins:8080
     JENKINS_PUBLIC_URL: http://localhost:8081
     JENKINS_USER: ${JENKINS_USER:-forgeflow}
     JENKINS_PASSWORD: ${JENKINS_PASSWORD:-forgeflow-local}
     JENKINS_REPOS_ROOT: /repos
+    # Unreachable when the `search` profile is not running; ForgeFlow then reports
+    # search as unavailable and carries on.
+    ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
+    ARTIFACTS_ROOT: /artifacts
   volumes:
-    # Read-write: ForgeFlow creates forgeflow/* branches and worktrees (never pushes).
+    # Read-write: ForgeFlow creates forgeflow/* branches and worktrees.
     - ./repos:/repos
     - ./workspaces:/workspaces
+    # Evidence (browser screenshots); spec section 155.
+    - ./artifacts:/artifacts
+  networks: [default, browser]
   depends_on:
     mongodb: { condition: service_healthy }
     redis: { condition: service_healthy }
@@ -107,6 +124,77 @@ services:
     <<: *python-service
     command: ["python", "-m", "forgeflow.apps.agent_worker.main"]
 
+  # Browser for QA (spec sections 28, 266A): Microsoft Playwright MCP in its own container.
+  # It is attached only to the internal `browser` network, so it can reach the agent
+  # workers (which serve the commit under test) but not the internet. Enable it for a
+  # project under Extensibility -> MCP servers -> Playwright preset.
+  playwright-mcp:
+    profiles: ["browser"]
+    image: mcr.microsoft.com/playwright/mcp:v0.0.82
+    # The image already runs: node cli.js --headless --browser chromium --no-sandbox
+    command:
+      - --port=8931
+      - --host=0.0.0.0
+      - --allowed-hosts=playwright-mcp
+      - --isolated
+      - --no-webmcp
+    networks: [browser]
+    mem_limit: 1g
+    restart: unless-stopped
+
+  # Searchable engineering history (spec sections 36-37). Optional: `--profile search`.
+  elasticsearch:
+    profiles: ["search"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      # Local development only; production needs TLS + authentication.
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    ports: ["9200:9200"]
+    volumes: [es-data:/usr/share/elasticsearch/data]
+    mem_limit: 1200m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # Metrics and dashboards (spec section 67). Optional: `--profile observability`.
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    mem_limit: 300m
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-forgeflow-local}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    mem_limit: 300m
+    restart: unless-stopped
+
   # Local CI (spec section 56). Optional: start with `--profile ci`.
   jenkins:
     profiles: ["ci"]
@@ -141,3 +229,12 @@ volumes:
   mongo-data:
   kafka-data:
   jenkins-home:
+  es-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  default: {}
+  # No route to the internet: only the browser and the agent workers are attached.
+  browser:
+    internal: true

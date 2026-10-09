@@ -9,9 +9,9 @@ const RISK: Record<Specification["risk_level"], string> = {
 
 export function Card({ title, children, aside }: { title: string; children: React.ReactNode; aside?: React.ReactNode }) {
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+    <section className="ff-card p-5">
       <div className="mb-3 flex items-baseline justify-between gap-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{title}</h2>
+        <h2 className="ff-label">{title}</h2>
         {aside}
       </div>
       {children}

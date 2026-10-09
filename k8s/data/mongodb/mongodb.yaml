@@ -1,0 +1,71 @@
+# Single-node replica set (transactions need one). For production use MongoDB Atlas
+# (overlays/atlas) or an operator-managed replica set.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  labels:
+    app.kubernetes.io/name: mongodb
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mongodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mongodb
+        forgeflow.dev/role: data
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: mongodb
+          image: mongo:7
+          args: ["--replSet", "rs0", "--bind_ip_all"]
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          # Initiates the replica set on first start (same as the compose healthcheck).
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - --quiet
+                - --eval
+                - >-
+                  try { rs.status().ok } catch (e) {
+                  rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongodb-0.mongodb:27017'}]}).ok }
+            periodSeconds: 10
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+    app.kubernetes.io/name: mongodb
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mongodb
+  ports:
+    - name: mongodb
+      port: 27017

@@ -27,7 +27,18 @@ class AgentRuntimeContext:
     # Verification agents: the change under review and the A2A channel to the Developer.
     diff: str | None = None
     a2a: A2AChannel | None = None
+    # Extensibility: resolved skills (prompt + reference files) and MCP proxy tools.
+    skills_prompt: str = ""
+    skill_files: dict[str, str] = field(default_factory=dict)
+    extra_tools: list[Any] = field(default_factory=list)
     policies: dict[str, Any] = field(default_factory=dict)
+    # Retrieval (KnowledgeService) scoped to this project's repository id.
+    knowledge: Any = None
+    repository_id: str | None = None
+    # Browser QA: where ForgeFlow serves the commit under test (None = no app served).
+    app_url: str | None = None
+    # MCP calls made through capability proxies in this run (tool, status, artifacts).
+    mcp_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     _workspace: WorkspaceFiles | None = field(default=None, repr=False)
 

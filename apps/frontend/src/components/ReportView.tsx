@@ -74,6 +74,16 @@ export function ReportView({ report }: { report: FinalReport }) {
           </div>
         </div>
         <p className="font-mono text-sm">{report.pr_title}</p>
+        {report.pull_request_url && (
+          <a
+            href={report.pull_request_url}
+            target="_blank"
+            rel="noreferrer"
+            className="w-fit rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
+          >
+            Open the pull request on GitHub
+          </a>
+        )}
         {report.branch && (
           <p className="text-xs text-slate-500">
             Branch <code>{report.branch}</code>
@@ -83,7 +93,7 @@ export function ReportView({ report }: { report: FinalReport }) {
                 @ <code>{report.commit.slice(0, 10)}</code>
               </>
             )}{" "}
-            · ForgeFlow does not push; create the PR from this branch.
+            {report.pull_request_url ? "" : " · No GitHub binding: create the PR from this branch, or bind the project under Extensibility → Projects."}
           </p>
         )}
         <details>
@@ -147,4 +157,4 @@ export function A2APanel({ workflowId }: { workflowId: string }) {
 const BUTTON =
   "rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800";
 const PRIMARY =
-  "rounded-lg bg-slate-900 px-3 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200";
+  "rounded-lg bg-[var(--ff-accent)] px-3 py-1 text-xs font-medium text-white hover:bg-[var(--ff-accent-hover)] disabled:opacity-40 ";

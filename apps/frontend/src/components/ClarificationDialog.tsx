@@ -153,7 +153,7 @@ function QuestionForm({
         <button
           type="submit"
           disabled={!canSubmit || submit.isPending}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+          className="rounded-lg bg-[var(--ff-accent)] px-4 py-2 text-sm font-medium text-white transition hover:bg-[var(--ff-accent-hover)] disabled:cursor-not-allowed disabled:opacity-40"
         >
           {submit.isPending ? "Sending…" : "Continue"}
         </button>

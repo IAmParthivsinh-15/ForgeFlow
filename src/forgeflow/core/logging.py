@@ -23,6 +23,20 @@ def clear_context() -> None:
     _correlation.set(None)
 
 
+def correlation() -> dict[str, str]:
+    """Current correlation fields (workflow_id, task_id, agent, ...)."""
+    return dict(_correlation.get() or {})
+
+
+def _trace_id() -> str | None:
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover - opentelemetry is a dependency
+        return None
+    context = trace.get_current_span().get_span_context()
+    return format(context.trace_id, "032x") if context.is_valid else None
+
+
 class JsonFormatter(logging.Formatter):
     def __init__(self, service: str) -> None:
         super().__init__()
@@ -37,6 +51,9 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         entry.update(_correlation.get() or {})
+        trace_id = _trace_id()
+        if trace_id:
+            entry["trace_id"] = trace_id
         extra = getattr(record, "fields", None)
         if isinstance(extra, dict):
             entry.update(extra)
